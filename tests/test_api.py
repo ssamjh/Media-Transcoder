@@ -6,6 +6,7 @@ exercise routing, validation, persistence and the state layer only.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import tempfile
@@ -33,8 +34,7 @@ class ApiTest(unittest.TestCase):
 
         cfg = Config()
         cfg.state_db = str(root / "state.db")
-        cfg.libraries[0].id, cfg.libraries[0].name = "tv", "TV"
-        cfg.libraries[0].paths = [str(root / "media" / "TV")]
+        cfgmod.add_library(cfg, "TV", [str(root / "media" / "TV")])
         cfgmod.add_library(cfg, "Movies", [str(root / "media" / "Movies")])
         cfg.output.temp_dir = str(root / "temp")
         cfg.schedule.enabled = False
@@ -317,13 +317,25 @@ class ApiTest(unittest.TestCase):
         self.post("/api/libraries/delete", {"id": "temp"})
         self.assertIsNone(self.db.get(tracked))
 
-    def test_cannot_delete_the_last_library(self):
-        self.post("/api/libraries/delete", {"id": "movies"})
-        d, status = self.post("/api/libraries/delete", {"id": "tv"})
-        self.assertEqual(status, 400)
-        self.post("/api/libraries/add", {
-            "name": "Movies",
-            "paths": [str(Path(self.tmp.name) / "media" / "Movies")]})
+    def test_every_library_can_be_deleted(self):
+        """Ending up with none is a legitimate state, not an error."""
+        # The server is shared across tests, so put the libraries back.
+        snapshot = copy.deepcopy(self.cfg.libraries)
+        self.addCleanup(lambda: self.cfg.libraries.__setitem__(
+            slice(None), copy.deepcopy(snapshot)))
+
+        for lib_id in ("movies", "tv"):
+            d, status = self.post("/api/libraries/delete", {"id": lib_id})
+            self.assertEqual(status, 200, lib_id)
+        self.assertEqual(d["libraries"], [])
+        self.assertEqual(self.get("/api/libraries")[0]["libraries"], [])
+
+        # The panel still has a mode editor to draw, and a scan still runs -
+        # it just has nothing to walk.
+        _, status = self.get("/api/modes")
+        self.assertEqual(status, 200)
+        _, status = self.post("/api/scan")
+        self.assertEqual(status, 200)
 
     def test_scan_accepts_a_library(self):
         d, status = self.post("/api/scan", {"library": "tv"})
@@ -472,7 +484,7 @@ class ApiKeyTest(unittest.TestCase):
         root = Path(cls.tmp.name)
         cfg = Config()
         cfg.state_db = str(root / "state.db")
-        cfg.libraries[0].paths = [str(root / "media")]
+        cfgmod.add_library(cfg, "Media", [str(root / "media")])
         cfg.output.temp_dir = str(root / "temp")
         cfg.schedule.enabled = False
         cfg.web.host, cfg.web.port = "127.0.0.1", 0
@@ -531,11 +543,16 @@ class ApiKeyTest(unittest.TestCase):
         self.assertEqual(status, 400)      # rejected for the missing path, not the key
 
     def test_the_panel_is_served_with_the_key_embedded(self):
-        """Otherwise the UI could not call its own API."""
+        """Otherwise the UI could not call its own API.
+
+        The key has to land as the *value*: index.html names __API_KEY__
+        twice on that line, once as the window property and once as the
+        placeholder, so substituting the bare token renames the property
+        and the panel silently loses its credential on every request.
+        """
         body, status = self.fetch("/")
         self.assertEqual(status, 200)
-        self.assertIn(self.KEY, body.decode())
-        self.assertNotIn("__API_KEY__", body.decode())
+        self.assertIn(f'window.__API_KEY__ = "{self.KEY}"', body.decode())
 
     def test_static_assets_need_no_key(self):
         for path in ("/", "/app.css", "/app.js"):

@@ -31,7 +31,7 @@ from test_plan import A, S, V, mk             # noqa: E402
 class Base(unittest.TestCase):
     def setUp(self):
         self.cfg = Config()
-        self.lib = self.cfg.libraries[0]
+        self.lib = cfgmod.add_library(self.cfg, "Media", ["/media"])
 
     def plan(self, streams, mode=None, **kw):
         lib = cfgmod.resolve_library(self.cfg, self.lib, mode)

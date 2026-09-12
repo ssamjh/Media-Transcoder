@@ -47,6 +47,7 @@ class ScanResult:
     cached: int = 0
     skipped: int = 0
     removed: int = 0
+    unowned: int = 0
     errors: list[tuple[str, str]] = field(default_factory=list)
     elapsed: float = 0.0
     per_library: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -280,6 +281,15 @@ class Engine:
                 out.append(p)
         return out
 
+    def _owned(self, path: str) -> bool:
+        """Does any library still cover this path?
+
+        Routing, not enablement: disabling a library is "leave it out of
+        scans", so it keeps what it knows and a re-enable costs no re-probe.
+        A path no library covers any more is state nobody will consult again.
+        """
+        return any(lib.contains(path) is not None for lib in self.cfg.libraries)
+
     def scan(self, paths: list[str] | None = None,
              use_cache: bool = True,
              library: str | None = None) -> ScanResult:
@@ -317,6 +327,8 @@ class Engine:
                              "already_fine": 0, "cached": 0}
                 )
 
+            if not libs:
+                log.warning("no libraries configured: nothing to scan")
             log.info("scan: %d candidate file(s) across %d librar%s",
                      len(work), len(libs), "y" if len(libs) == 1 else "ies")
             self.scan_progress = (0, len(work))
@@ -358,6 +370,10 @@ class Engine:
                     tally["need_work"] += 1
 
             res.removed = self.db.forget_missing(seen, roots_scanned)
+            # Only a full scan can tell that a file belongs to nobody: a
+            # library-scoped or path-scoped scan never looks at the rest.
+            if paths is None and library is None:
+                res.unowned = self.db.forget_unowned(self._owned)
             self.last_scan = time.time()
         finally:
             self.scanning = False
@@ -370,6 +386,7 @@ class Engine:
             "already_fine": res.skipped,
             "cached": res.cached,
             "removed": res.removed,
+            "unowned": res.unowned,
             "errors": len(res.errors),
             "elapsed": res.elapsed,
             "roots": roots_scanned,
@@ -377,9 +394,9 @@ class Engine:
         }
         log.info(
             "scan done in %.1fs: %d need work, %d already fine, %d cached, "
-            "%d gone, %d error(s)",
+            "%d gone, %d no longer in a library, %d error(s)",
             res.elapsed, len(res.needs_work), res.skipped, res.cached,
-            res.removed, len(res.errors),
+            res.removed, res.unowned, len(res.errors),
         )
         return res
 

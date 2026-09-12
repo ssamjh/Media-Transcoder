@@ -198,8 +198,11 @@ class Handler(BaseHTTPRequestHandler):
         if not f.exists():
             raise ApiError("not found", 404)
         if name == "index.html":
+            # Substitute the quoted placeholder, not the bare token: the line
+            # in index.html also names the variable __API_KEY__, and replacing
+            # that too would leave the page setting window.<key> instead.
             page = f.read_text(encoding="utf-8").replace(
-                "__API_KEY__", self.engine.cfg.web.api_key or "")
+                '"__API_KEY__"', json.dumps(self.engine.cfg.web.api_key or ""))
             return self._send(page.encode(), ctype)
         self._send(f.read_bytes(), ctype)
 
@@ -500,7 +503,8 @@ class Handler(BaseHTTPRequestHandler):
                 for m in cfg.modes
             ],
             "library_keys": sorted(
-                f["key"] for block in config_mod.library_schema(cfg.libraries[0])
+                f["key"] for block in config_mod.library_schema(
+                    cfg.libraries[0] if cfg.libraries else config_mod.LibraryCfg())
                 for f in block["fields"]
                 if f["key"] not in config_mod.MODE_FORBIDDEN
             ),

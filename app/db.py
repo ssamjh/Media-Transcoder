@@ -8,9 +8,11 @@ asks (filter, search, paginate, per-file detail).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,16 @@ def _json(value: Any) -> str | None:
     if value is None or isinstance(value, str):
         return value
     return json.dumps(value)
+
+
+def _under(path: str, root: str) -> bool:
+    """Is path inside root? Compared by path segment, not by prefix.
+
+    A bare startswith would put /media/TV-4K under the root /media/TV.
+    """
+    target = os.path.normcase(os.path.normpath(path))
+    r = os.path.normcase(os.path.normpath(root))
+    return target == r or target.startswith(r.rstrip(os.sep) + os.sep)
 
 
 def loads(value: Any, fallback: Any) -> Any:
@@ -218,13 +230,30 @@ class Db:
                 path = r["path"]
                 if path in seen:
                     continue
-                if roots and not any(path.startswith(root) for root in roots):
+                if roots and not any(_under(path, root) for root in roots):
                     continue
                 if not Path(path).exists():
                     self._conn.execute("DELETE FROM files WHERE path = ?", (path,))
                     removed += 1
             self._conn.commit()
         return removed
+
+    def forget_unowned(self, is_owned: Callable[[str], bool]) -> int:
+        """Drop rows for files no longer covered by any library.
+
+        A row survives a scan only because something still routes to it.
+        Narrow a library's paths, or delete a library, and its files stop
+        being scanned but keep counting towards the tracked totals and keep
+        getting queued, so the state has to go with them.
+        """
+        with self._lock:
+            gone = [r["path"] for r
+                    in self._conn.execute("SELECT path FROM files")
+                    if not is_owned(r["path"])]
+            for path in gone:
+                self._conn.execute("DELETE FROM files WHERE path = ?", (path,))
+            self._conn.commit()
+        return len(gone)
 
     def forget_library(self, lib_id: str) -> int:
         """Drop tracked state for a library that no longer exists."""

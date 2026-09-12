@@ -217,7 +217,10 @@ class Config:
     workers: WorkersCfg = field(default_factory=WorkersCfg)
     output: OutputCfg = field(default_factory=OutputCfg)
     web: WebCfg = field(default_factory=WebCfg)
-    libraries: list[LibraryCfg] = field(default_factory=lambda: [LibraryCfg()])
+    # No library by default: a fresh install has nothing to scan until
+    # someone points it at a path, and guessing /media would start a scan
+    # of whatever happened to be mounted there.
+    libraries: list[LibraryCfg] = field(default_factory=list)
     modes: list[ModeCfg] = field(default_factory=default_modes)
 
     def mode(self, mode_id: str) -> ModeCfg | None:
@@ -625,8 +628,6 @@ def apply_library_updates(cfg: Config, lib: LibraryCfg,
 
 
 def _validate_global(cfg: Config) -> None:
-    if not cfg.libraries:
-        raise ConfigError("at least one library is required")
     ids = [l.id for l in cfg.libraries]
     if len(set(ids)) != len(ids):
         raise ConfigError("library ids must be unique")
@@ -725,8 +726,6 @@ def remove_library(cfg: Config, lib_id: str) -> LibraryCfg:
     lib = cfg.library(lib_id)
     if lib is None:
         raise ConfigError(f"no such library: {lib_id}")
-    if len(cfg.libraries) == 1:
-        raise ConfigError("the last library cannot be removed")
     cfg.libraries.remove(lib)
     return lib
 
@@ -893,6 +892,18 @@ def dump_toml(cfg: Config) -> str:
         "",
     ]
     _emit(schema(cfg), "", out)
+
+    if not cfg.libraries:
+        out.append("")
+        out.append("# " + "-" * 70)
+        out.append("# No libraries are configured, so nothing is scanned.")
+        out.append("# Add one in the web panel, or by hand:")
+        out.append("#")
+        out.append("#   [[libraries]]")
+        out.append("#   name = \"Media\"")
+        out.append("#   paths = [\"/media\"]")
+        out.append("# " + "-" * 70)
+        out.append("")
 
     for lib in cfg.libraries:
         out.append("")

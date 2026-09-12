@@ -18,10 +18,15 @@ from app import config as cfgmod                    # noqa: E402
 from app.config import Config, ConfigError          # noqa: E402
 
 
-def three_libraries() -> Config:
+def one_library(path: str = "/media/A", name: str = "Media") -> Config:
+    """A config with a single library: Config() itself now has none."""
     c = Config()
-    c.libraries[0].id, c.libraries[0].name = "tv", "TV"
-    c.libraries[0].paths = ["/media/TV"]
+    cfgmod.add_library(c, name, [path])
+    return c
+
+
+def three_libraries() -> Config:
+    c = one_library("/media/TV", "TV")
     cfgmod.add_library(c, "Movies", ["/media/Movies"])
     cfgmod.add_library(c, "Home Video", ["/media/Home", "/media/Camera"])
     return c
@@ -30,6 +35,7 @@ def three_libraries() -> Config:
 class TestRoundTrip(unittest.TestCase):
     def test_defaults_survive_a_round_trip(self):
         c = Config()
+        self.assertEqual(c.libraries, [])      # a fresh install scans nothing
         self.assertEqual(cfgmod.loads(cfgmod.dump_toml(c)), c)
 
     def test_multiple_libraries_survive_a_round_trip(self):
@@ -65,7 +71,7 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(cfgmod.loads(cfgmod.dump_toml(c)), c)
 
     def test_awkward_strings_survive(self):
-        c = Config()
+        c = one_library()
         lib = c.libraries[0]
         cfgmod.apply_library_updates(c, lib, {
             "audio.commentary_pattern": r'commentary|"quoted"|back\slash',
@@ -80,7 +86,7 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(back.libraries[0].name, lib.name)
 
     def test_dict_fields_survive(self):
-        c = Config()
+        c = one_library()
         cfgmod.apply_library_updates(c, c.libraries[0],
                                      {"audio.channel_score": {"6": 40, "2": 10}})
         back = cfgmod.loads(cfgmod.dump_toml(c))
@@ -88,7 +94,7 @@ class TestRoundTrip(unittest.TestCase):
 
     def test_empty_string_entry_is_preserved(self):
         """"" means "no language tag" in undefined_languages."""
-        c = Config()
+        c = one_library()
         self.assertIn("", c.libraries[0].subtitles.undefined_languages)
         back = cfgmod.loads(cfgmod.dump_toml(c))
         self.assertIn("", back.libraries[0].subtitles.undefined_languages)
@@ -105,7 +111,7 @@ class TestRoundTrip(unittest.TestCase):
             self.assertEqual(loaded.library("movies").video.crf_720p, 25)
 
     def test_generated_file_carries_its_documentation(self):
-        text = cfgmod.dump_toml(Config())
+        text = cfgmod.dump_toml(one_library())
         self.assertIn("# Quality for 1080p sources", text)
         self.assertIn("(takes effect on restart)", text)
         self.assertIn("[[libraries]]", text)
@@ -117,38 +123,34 @@ class TestRoundTrip(unittest.TestCase):
 
 class TestLibraries(unittest.TestCase):
     def test_add_generates_a_unique_slug(self):
-        c = Config()
-        c.libraries[0].paths = ["/media/A"]
+        c = one_library()
         a = cfgmod.add_library(c, "TV Shows", ["/media/TV"])
         b = cfgmod.add_library(c, "TV Shows", ["/media/TV2"])
         self.assertEqual(a.id, "tv-shows")
         self.assertEqual(b.id, "tv-shows-2")
 
     def test_new_library_starts_from_defaults(self):
-        c = Config()
-        c.libraries[0].paths = ["/media/A"]
+        c = one_library()
         lib = cfgmod.add_library(c, "New", ["/media/New"])
         self.assertTrue(lib.video.enabled)
         self.assertEqual(lib.video.crf_1080p, 22)
         self.assertEqual(lib.subtitles.keep_languages, ["eng", "en", "english"])
 
     def test_rejects_overlapping_paths(self):
-        c = Config()
-        c.libraries[0].paths = ["/media/TV"]
+        c = one_library("/media/TV")
         for bad in (["/media/TV"], ["/media/TV/Sub"], ["/media"]):
             with self.assertRaises(ConfigError, msg=str(bad)):
                 cfgmod.add_library(c, "Bad", bad)
         self.assertEqual(len(c.libraries), 1)   # nothing was left behind
 
     def test_rejects_duplicate_paths_within_one_library(self):
-        c = Config()
+        c = one_library()
         with self.assertRaises(ConfigError):
             cfgmod.apply_library_updates(c, c.libraries[0],
                                          {"paths": ["/media/X", "/media/X"]})
 
     def test_rejects_nameless_or_pathless(self):
-        c = Config()
-        c.libraries[0].paths = ["/media/A"]
+        c = one_library()
         with self.assertRaises(ConfigError):
             cfgmod.add_library(c, "   ", ["/media/B"])
         with self.assertRaises(ConfigError):
@@ -160,17 +162,19 @@ class TestLibraries(unittest.TestCase):
         self.assertIsNone(c.library("movies"))
         self.assertEqual(len(c.libraries), 2)
 
-    def test_cannot_remove_the_last_library(self):
-        c = Config()
-        with self.assertRaises(ConfigError):
-            cfgmod.remove_library(c, c.libraries[0].id)
+    def test_the_last_library_can_be_removed(self):
+        """Nothing is scanned without a library, which is a valid state."""
+        c = one_library()
+        cfgmod.remove_library(c, c.libraries[0].id)
+        self.assertEqual(c.libraries, [])
+        self.assertEqual(cfgmod.loads(cfgmod.dump_toml(c)).libraries, [])
 
     def test_remove_unknown(self):
         with self.assertRaises(ConfigError):
             cfgmod.remove_library(three_libraries(), "nope")
 
     def test_id_is_read_only(self):
-        c = Config()
+        c = one_library()
         with self.assertRaises(ConfigError):
             cfgmod.apply_library_updates(c, c.libraries[0], {"id": "other"})
 
@@ -187,7 +191,7 @@ class TestLibraries(unittest.TestCase):
 
 class TestValidation(unittest.TestCase):
     def setUp(self):
-        self.c = Config()
+        self.c = one_library()
         self.lib = self.c.libraries[0]
 
     def test_rejects_unknown_key(self):
@@ -203,7 +207,7 @@ class TestValidation(unittest.TestCase):
                 cfgmod.apply_updates(Config(), {key: value})
         for key, value in [("video.crf_1080p", 99), ("video.crf_1080p", -1),
                            ("min_size_mb", -5)]:
-            c = Config()
+            c = one_library()
             with self.assertRaises(ConfigError, msg=key):
                 cfgmod.apply_library_updates(c, c.libraries[0], {key: value})
 
@@ -262,7 +266,7 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(missing, [], f"undocumented settings: {missing}")
 
     def test_every_library_field_is_described(self):
-        lib = Config().libraries[0]
+        lib = cfgmod.LibraryCfg()
         missing = [f["key"] for block in cfgmod.library_schema(lib)
                    for f in block["fields"] if not f["desc"]]
         self.assertEqual(missing, [], f"undocumented settings: {missing}")
@@ -279,7 +283,7 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(g["workers.count"], "int")
         self.assertEqual(g["output.min_duration_ratio"], "float")
 
-        lib = Config().libraries[0]
+        lib = cfgmod.LibraryCfg()
         l = {f["key"]: f["type"] for block in cfgmod.library_schema(lib)
              for f in block["fields"]}
         self.assertEqual(l["paths"], "list")
@@ -288,13 +292,13 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(l["video.enabled"], "bool")
 
     def test_library_id_is_marked_read_only(self):
-        lib = Config().libraries[0]
+        lib = cfgmod.LibraryCfg()
         entry = next(f for block in cfgmod.library_schema(lib)
                      for f in block["fields"] if f["key"] == "id")
         self.assertTrue(entry["readonly"])
 
     def test_each_stage_exposes_an_enabled_switch(self):
-        lib = Config().libraries[0]
+        lib = cfgmod.LibraryCfg()
         keys = {f["key"] for block in cfgmod.library_schema(lib)
                 for f in block["fields"]}
         for key in ("video.enabled", "audio.enabled", "subtitles.enabled"):

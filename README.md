@@ -50,8 +50,10 @@ docker compose up -d --build
 ```
 
 The panel is on <http://localhost:8080>. On first start it writes a fully
-commented `config/config.toml` with one default library, and generates an API
-key for [Sonarr and Radarr](#sonarr-and-radarr).
+commented `config/config.toml` and generates an API key for
+[Sonarr and Radarr](#sonarr-and-radarr). No libraries are configured, so
+nothing is scanned until you add one — *Add library* in the Libraries tab, or
+`transcoder libraries --add`.
 
 > **The panel itself has no authentication.** The API key guards `/api/`, but
 > the panel is served with that key embedded so the UI can use it — anyone who
@@ -259,7 +261,9 @@ Nothing overwrites a source file until the encode has been verified:
   `os.replace`, so a crash mid-copy can never leave a half-written file
 - three failed attempts and a file is left alone until you retry it
 - `docker stop` cancels running encodes cleanly and leaves originals intact
-- deleting a library forgets its tracked state; no media files are touched
+- deleting a library forgets its tracked state; no media files are touched.
+  Deleting the last one is allowed: with no libraries there is simply nothing
+  to scan
 
 ## Tuning throughput
 

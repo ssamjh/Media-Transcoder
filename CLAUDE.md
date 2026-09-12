@@ -87,6 +87,10 @@ its streams through untouched. `Config.library_for(path)` routes a file by longe
 root; overlapping library paths are rejected at config-validation time precisely because a
 file under two libraries would have an ambiguous profile.
 
+There is no default library and no minimum. A fresh `Config()` has none, every library can
+be deleted, and anything that needs a library to render — mode schemas, say — falls back to
+a throwaway `LibraryCfg()` instead of assuming `libraries[0]` exists.
+
 Notifications are part of the library profile (`LibraryCfg.notify`) for the same reason
 everything else is: whether Jellyfin should be told about a file is a property of the
 library, and being an ordinary dotted key means a **mode can override it** — an import

@@ -57,7 +57,7 @@ def mk(streams, path="/media/TV/Show/S01E01.mkv", duration=2700.0, size=4 * 2**3
 class Base(unittest.TestCase):
     def setUp(self):
         self.cfg = Config()
-        self.lib = self.cfg.libraries[0]
+        self.lib = cfgmod.add_library(self.cfg, "Media", ["/media"])
 
     def plan(self, streams, **kw):
         return plan_file(mk(streams, **kw), self.lib, self.cfg)
@@ -376,8 +376,7 @@ class TestArgs(Base):
 class TestLibraryRouting(unittest.TestCase):
     def test_each_library_uses_its_own_profile(self):
         cfg = Config()
-        cfg.libraries[0].paths = ["/media/TV"]
-        cfg.libraries[0].name, cfg.libraries[0].id = "TV", "tv"
+        cfgmod.add_library(cfg, "TV", ["/media/TV"])
         cfgmod.add_library(cfg, "Movies", ["/media/Movies"])
         tv, movies = cfg.library("tv"), cfg.library("movies")
         movies.video.enabled = False
@@ -403,8 +402,7 @@ class TestLibraryRouting(unittest.TestCase):
 
     def test_routing_picks_the_longest_matching_root(self):
         cfg = Config()
-        cfg.libraries[0].paths = ["/media/TV"]
-        cfg.libraries[0].name, cfg.libraries[0].id = "TV", "tv"
+        cfgmod.add_library(cfg, "TV", ["/media/TV"])
         cfgmod.add_library(cfg, "Anime", ["/media/TV-Anime"])
         self.assertEqual(cfg.library_for("/media/TV/Show/a.mkv").id, "tv")
         self.assertEqual(cfg.library_for("/media/TV-Anime/b.mkv").id, "anime")
@@ -412,8 +410,7 @@ class TestLibraryRouting(unittest.TestCase):
 
     def test_disabled_libraries_route_nothing(self):
         cfg = Config()
-        cfg.libraries[0].paths = ["/media/TV"]
-        cfg.libraries[0].enabled = False
+        cfgmod.add_library(cfg, "TV", ["/media/TV"]).enabled = False
         self.assertIsNone(cfg.library_for("/media/TV/a.mkv"))
 
 

@@ -242,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _print_libraries(cfg) -> None:
+    if not cfg.libraries:
+        print("No libraries configured. Add one in the web panel, or put a "
+              "[[libraries]] block in the config file.")
+        return
     rows = []
     for lib in cfg.libraries:
         stages = ", ".join(filter(None, [

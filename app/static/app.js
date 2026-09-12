@@ -315,6 +315,15 @@ function collectDirty(blocks, scope, root) {
 let libraries = [];
 const libOpen = new Set();
 
+function statsHtml(st) {
+  return `<span class="tag">${st.total} tracked</span>
+    <span class="tag info">${st.counts.pending || 0} need work</span>
+    <span class="tag ok">${st.counts.done || 0} done</span>
+    ${st.counts.failed ? `<span class="tag bad">${st.counts.failed} failed</span>` : ""}
+    <span class="tag">${bytes(st.bytes)} on disk</span>
+    ${st.saved > 0 ? `<span class="tag ok">${bytes(st.saved)} reclaimed</span>` : ""}`;
+}
+
 function renderLibraries() {
   el("libraries").innerHTML = libraries.map((lib) => {
     const st = lib.stats || { total: 0, counts: {}, saved: 0, bytes: 0 };
@@ -342,14 +351,7 @@ function renderLibraries() {
         <span class="stage ${s.replace ? "on" : "off"}">replace originals</span>
         <span class="stage ${s.notify ? "on" : "off"}">notify on finish</span>
       </div>
-      <div class="lib-stats">
-        <span class="tag">${st.total} tracked</span>
-        <span class="tag info">${st.counts.pending || 0} need work</span>
-        <span class="tag ok">${st.counts.done || 0} done</span>
-        ${st.counts.failed ? `<span class="tag bad">${st.counts.failed} failed</span>` : ""}
-        <span class="tag">${bytes(st.bytes)} on disk</span>
-        ${st.saved > 0 ? `<span class="tag ok">${bytes(st.saved)} reclaimed</span>` : ""}
-      </div>
+      <div class="lib-stats">${statsHtml(st)}</div>
       ${open ? `<div class="lib-body">
         <div class="toolbar" style="padding:13px 16px 0;margin:0">
           <button class="primary small" data-lib-save="${esc(lib.id)}" disabled>Save changes</button>
@@ -430,6 +432,23 @@ function wireLibraries() {
       });
     refreshLibDirty(lib);
   });
+}
+
+async function refreshLibStats() {
+  // A scan running in the background keeps changing these counts, but a
+  // re-render would throw away whatever the user is typing into an open
+  // Configure panel - so update only the numbers.
+  let fresh;
+  try {
+    fresh = (await api("/api/libraries")).libraries;
+  } catch { return; }
+  for (const lib of fresh) {
+    const known = libraries.find((l) => l.id === lib.id);
+    if (known) known.stats = lib.stats;
+    const node = el("libraries")
+      .querySelector(`[data-lib="${CSS.escape(lib.id)}"] .lib-stats`);
+    if (node) node.innerHTML = statsHtml(lib.stats);
+  }
 }
 
 async function loadLibraries() {
@@ -563,6 +582,7 @@ async function tick() {
         <span class="tag ok">${s.already_fine || 0} already fine</span>
         <span class="tag">${s.cached || 0} cached</span>
         ${s.removed ? `<span class="tag">${s.removed} gone</span>` : ""}
+        ${s.unowned ? `<span class="tag">${s.unowned} no longer in a library</span>` : ""}
         ${s.errors ? `<span class="tag bad">${s.errors} errors</span>` : ""}
       </div>
       ${perLib.length ? `<div class="meta" style="margin-top:7px">${
@@ -959,5 +979,6 @@ tick();
 setInterval(() => { if (current === "dashboard") tick(); }, 2000);
 setInterval(() => { if (current === "files") loadFiles(); }, 8000);
 setInterval(() => {
-  if (current === "libraries" && libOpen.size === 0) loadLibraries();
+  if (current !== "libraries") return;
+  if (libOpen.size === 0) loadLibraries(); else refreshLibStats();
 }, 8000);
