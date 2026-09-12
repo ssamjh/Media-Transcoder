@@ -348,7 +348,7 @@ class TestArgs(Base):
         self.assertIn("-c:0 libx265", joined)
         self.assertIn("-preset:0 medium", joined)
         self.assertIn("-crf:0 22", joined)
-        self.assertIn("-x265-params:0 pools=6", joined)
+        self.assertIn(f"-x265-params:0 pools={self.cfg.workers.pools}", joined)
 
     def test_dropped_streams_are_never_mapped(self):
         p = self.plan([V(0, "h264"), A(1, "eac3", 6, "eng", default=1),

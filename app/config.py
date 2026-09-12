@@ -189,13 +189,17 @@ class ScheduleCfg:
 
 @dataclass
 class WorkersCfg:
-    count: int = 4
-    pools: int = 6
+    # Sized for an ordinary 8-thread host: 2 x 4 keeps every thread busy
+    # without oversubscribing. Raise both together on a bigger box.
+    count: int = 2
+    pools: int = 4
 
 
 @dataclass
 class OutputCfg:
-    temp_dir: str = "/temp"
+    # Inside the container by default, so it needs no mount and no
+    # permissions of its own. Point it at real disk if /tmp is small.
+    temp_dir: str = "/tmp/transcoder"
     min_duration_ratio: float = 0.98
     chown_uid: int = -1
     chown_gid: int = -1
@@ -291,7 +295,8 @@ META: dict[str, dict[str, Any]] = {
 
     "output.temp_dir": {
         "desc": "Scratch directory for encodes. Use local disk, not a network "
-                "share.", "restart": True},
+                "share. Needs room for one in-progress encode per worker.",
+        "restart": True},
     "output.min_duration_ratio": {
         "desc": "Output must be at least this fraction of the source duration. "
                 "Catches truncated encodes that still exit 0.",

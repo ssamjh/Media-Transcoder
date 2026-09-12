@@ -35,19 +35,30 @@ Chapters and metadata are always preserved.
 
 ## Quick start
 
-The container runs as uid/gid 1000, so give it a writable scratch directory:
+Point the volumes in `compose.yml` at your media, set `PUID`/`PGID` to
+whoever owns it, and start:
 
 ```bash
-mkdir -p config
-sudo mkdir -p /mnt/local/transcode-temp
-sudo chown 1000:1000 /mnt/local/transcode-temp
-```
-
-Edit the volume paths in `compose.yml`, then:
-
-```bash
+stat -c '%u:%g' /mnt/nfs/media     # the ids to put in PUID/PGID
 docker compose up -d --build
 ```
+
+The container starts as root, moves its own user onto `PUID`/`PGID`, takes
+ownership of what it writes to, and drops to that user before running
+anything — the same arrangement as the linuxserver.io images, so no host
+directory needs chowning by hand.
+
+Encodes are written to `/tmp/transcoder`, mounted from `./transcode_cache`
+next to the compose file. It needs room for one in-progress encode per worker
+— about the size of the source file, times `workers.count` — which is why it
+is a real directory and not the container's own filesystem. Point it at
+another disk if the one you deploy from is short of space, and keep it off
+network shares, which an encode reads and writes constantly.
+
+Startup checks the config and scratch directories and stops with the offending
+path if either is unwritable. The media tree is the one thing that cannot be
+checked in advance — it is found to be read-only only when a finished encode
+is moved into place, so `PUID`/`PGID` want to match its owner.
 
 The panel is on <http://localhost:8080>. On first start it writes a fully
 commented `config/config.toml` and generates an API key for
@@ -261,6 +272,8 @@ Nothing overwrites a source file until the encode has been verified:
   `os.replace`, so a crash mid-copy can never leave a half-written file
 - three failed attempts and a file is left alone until you retry it
 - `docker stop` cancels running encodes cleanly and leaves originals intact
+- a work directory left in the scratch space by a kill -9 or a host reboot is
+  swept on the next start; anything not written by an encode is left alone
 - deleting a library forgets its tracked state; no media files are touched.
   Deleting the last one is allowed: with no libraries there is simply nothing
   to scan
@@ -269,9 +282,9 @@ Nothing overwrites a source file until the encode has been verified:
 
 `workers.count` × `workers.pools` should land near your host's CPU thread
 count. x265 scales poorly past about 12 threads, so throughput comes from
-running several concurrent encodes rather than one very wide one. On a 24-core
-box, 4 workers × 6 pool threads is a good starting point. Workers are shared
-across all libraries.
+running several concurrent encodes rather than one very wide one. The default
+2 × 4 suits an ordinary 8-thread host; on a 24-thread box, 4 workers × 6 pool
+threads is a good starting point. Workers are shared across all libraries.
 
 ## State
 

@@ -191,6 +191,59 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+# Subcommands that will actually encode something, and so need the scratch
+# directory to be writable before they start rather than three attempts in.
+_ENCODES = {"daemon", "run", "process"}
+
+
+def _owner() -> str | None:
+    """This process's uid:gid, or None off POSIX."""
+    if hasattr(os, "getuid"):
+        return f"{os.getuid()}:{os.getgid()}"
+    return None
+
+
+def _writable(d: Path) -> str | None:
+    """None if files can be created in d, else why not."""
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / f".write-test-{os.getpid()}"
+        probe.touch()
+        probe.unlink()
+    except OSError as exc:
+        return str(exc)
+    return None
+
+
+def _preflight(cfg, log, check_temp: bool) -> bool:
+    """Check the writable directories up front.
+
+    A bind mount carries the host directory's ownership, so a container
+    running as a non-root uid cannot write to a directory the host created
+    as root. Finding that out per file means every encode dies mid-flight
+    and burns an attempt, so it is worth one check at startup.
+    """
+    checks = [("state database directory", Path(cfg.state_db).parent)]
+    if check_temp:
+        checks.append(("encode scratch directory", Path(cfg.output.temp_dir)))
+
+    ok = True
+    for what, d in checks:
+        why = _writable(d)
+        if why is None:
+            continue
+        ok = False
+        owner = _owner()
+        log.error("%s %s is not writable as %s: %s", what, d,
+                  f"uid:gid {owner}" if owner else "this user", why)
+        if owner:
+            log.error("  a bind mount keeps the host directory's ownership. "
+                      "Set PUID/PGID to whoever owns it on the host, or "
+                      "chown -R %s <the host directory mounted at %s>",
+                      owner, d)
+    return ok
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
@@ -221,6 +274,9 @@ def main(argv: list[str] | None = None) -> int:
         cfg.state_db = args.db
     if getattr(args, "dry_run", False):
         cfg.dry_run = True
+
+    if not _preflight(cfg, log, check_temp=args.cmd in _ENCODES and not cfg.dry_run):
+        return 2
 
     db = Db(cfg.state_db)
     engine = Engine(cfg, db, config_path=args.config)

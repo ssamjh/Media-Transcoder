@@ -28,12 +28,22 @@ port but never starts worker threads, so it touches nothing.
   file, no venv, nothing to `pip install`. Adding a dependency breaks the premise of the
   Dockerfile and the README.
 - **Python 3.14 / ffmpeg 7.x** (Debian 13 base image).
+- **The image starts as root and steps down.** `docker-entrypoint.sh` moves the
+  `transcoder` user onto `PUID`/`PGID`, chowns `/config` and the configured scratch
+  directory, and `exec setpriv`s into it — the linuxserver.io arrangement, so a bind
+  mount's host ownership is matched instead of fought. Started unprivileged (compose
+  `user:`) it skips all of that and runs as whoever it is. `cli._preflight` then checks
+  those directories are writable before the first encode, because finding out per file
+  burns a retry attempt each time.
 - **Planning must be idempotent.** `plan_file()` applied to a file this tool already produced
   must return `needs_work == False`, *for every combination of stage switches, and under
   every mode* — otherwise every scan re-processes the whole library forever, or a repeated
   import hook encodes twice. `tests/test_plan.py::TestIdempotency` and
   `tests/test_modes.py::TestIdempotency` assert this; any change to planning rules needs a
   matching case there.
+- **The scratch space is swept on `Engine.start()`.** `ffmpeg.sweep_scratch` deletes
+  `WORK_PREFIX`-named leftovers from a hard kill — startup is the one moment no encode
+  of ours is running, which is the same reasoning behind `db` resetting `running` rows.
 - **Nothing overwrites a source until it verifies** (`ffmpeg._verify` → `replace_original`):
   encode to temp dir, re-probe, check stream count and ≥`min_duration_ratio` of source
   duration, discard if larger, stage next to the original, `os.replace` into place.

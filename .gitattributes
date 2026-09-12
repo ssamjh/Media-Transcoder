@@ -1,2 +1,3 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# The image is built and run on Linux: keep shell scripts and build files
+# LF-only, or the entrypoint's shebang breaks on checkout from Windows.
+* text=auto eol=lf

@@ -4,7 +4,6 @@ services:
     build: .
     image: transcoder:latest
     restart: unless-stopped
-    user: "1000:1000"
     ports:
       # The panel has no authentication and can start encodes and rewrite the
       # config, so bind it to a trusted network only.
@@ -13,11 +12,22 @@ services:
       - TZ=Pacific/Auckland
       - TRANSCODER_CONFIG=/config/config.toml
       - LOG_LEVEL=info
+      # The container starts as root, moves its user onto these ids, chowns
+      # what it writes to, and drops to them. Set them to whoever owns your
+      # media on the host - `stat -c '%u:%g' /mnt/nfs/media` - and nothing
+      # needs chowning by hand.
+      - PUID=1000
+      - PGID=1000
     volumes:
       - ./config:/config
       - /mnt/nfs/media:/media
       # Encodes are written here first and only moved onto the library once
-      # they verify, so this wants to be local disk, not a network share.
-      - /mnt/Downloads/Transcode-Temp:/temp
-    cpus: 24
-    mem_limit: 8g
+      # they verify - so it must be real disk with room for one in-progress
+      # encode per worker (roughly the size of the source file, times
+      # workers.count), and not the container's own filesystem. Point it at
+      # a faster or roomier disk if this one is neither; keep it off network
+      # shares, which an encode hammers. The entrypoint chowns it to
+      # PUID:PGID on start, so it can be owned by anyone.
+      - ./transcode_cache:/tmp/transcoder
+    cpus: 8
+    mem_limit: 4g

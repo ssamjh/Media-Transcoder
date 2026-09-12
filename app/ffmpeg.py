@@ -7,6 +7,7 @@ encoder, which silently produces H.264 for mkv.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -23,7 +24,13 @@ from .config import Config, LibraryCfg
 from .plan import FilePlan
 from .probe import ProbeError, probe_file
 
+log = logging.getLogger("transcoder.ffmpeg")
+
 FFMPEG = "ffmpeg"
+
+# Every encode gets its own directory under the scratch root, named with this
+# prefix so a later sweep can tell our debris from anything else living there.
+WORK_PREFIX = "transcode-"
 
 ProgressCb = Callable[[float, float], None]  # (percent 0-100, speed multiplier)
 
@@ -158,6 +165,42 @@ def _verify(src_plan: FilePlan, dest: Path, cfg: Config) -> None:
             )
 
 
+def sweep_scratch(cfg: Config) -> tuple[int, int]:
+    """Delete work directories left behind by a hard kill.
+
+    encode() cleans up after itself on failure, but SIGKILL or a host reboot
+    mid-encode leaves a source-sized directory in the scratch space that
+    nothing would ever remove. Called when the engine starts, at which point
+    no encode of ours is running, so everything matching the prefix is
+    debris. Returns (entries removed, bytes reclaimed).
+    """
+    root = Path(cfg.output.temp_dir)
+    removed = freed = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return (0, 0)
+
+    for entry in entries:
+        if not entry.name.startswith(WORK_PREFIX):
+            continue
+        try:
+            size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())                 if entry.is_dir() else entry.stat().st_size
+        except OSError:
+            size = 0
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError as exc:
+            log.warning("could not remove stale scratch %s: %s", entry, exc)
+            continue
+        removed += 1
+        freed += size
+    return (removed, freed)
+
+
 def encode(plan: FilePlan, cfg: Config, on_progress: ProgressCb | None = None,
            cancel: Callable[[], bool] | None = None) -> EncodeResult:
     """Encode to a temp file, verify it, and return where it landed.
@@ -170,7 +213,7 @@ def encode(plan: FilePlan, cfg: Config, on_progress: ProgressCb | None = None,
 
     temp_root = Path(cfg.output.temp_dir)
     temp_root.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="transcode-", dir=str(temp_root)))
+    work = Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir=str(temp_root)))
     dest = work / f"{src.stem}.{plan.container}"
 
     started = time.monotonic()

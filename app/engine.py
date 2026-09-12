@@ -93,6 +93,15 @@ class Engine:
     # --- lifecycle --------------------------------------------------------
 
     def start(self) -> None:
+        # Nothing of ours is encoding yet, so anything in the scratch space is
+        # left over from a kill -9 or a host reboot, and it is source-file
+        # sized. The database does the same thing for 'running' rows.
+        removed, freed = ffmpeg.sweep_scratch(self.cfg)
+        if removed:
+            log.info("swept %d stale scratch director%s (%.1f GB reclaimed)",
+                     removed, "y" if removed == 1 else "ies",
+                     freed / (1024 ** 3))
+
         for i in range(max(1, self.cfg.workers.count)):
             t = threading.Thread(target=self._worker_loop, name=f"worker-{i}",
                                  daemon=True)
