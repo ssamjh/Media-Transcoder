@@ -13,6 +13,7 @@ without re-encoding any video.
 
 from __future__ import annotations
 
+import copy as copymod
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +21,8 @@ from typing import Any
 
 from .config import Config, Profile
 from .probe import (
-    Probe, channels_of, codec_of, is_attached_pic, is_default, lang_of, title_of,
+    Probe, bitrate_of, channels_of, codec_of, is_attached_pic, is_comment,
+    is_default, is_visual_impaired, lang_of, title_of,
 )
 
 
@@ -33,8 +35,12 @@ class StreamPlan:
     codec: str                      # "copy", "libx265", "aac", ...
     # Extra args; "{i}" is substituted with the *output* stream index.
     extra: list[str] = field(default_factory=list)
+    # Decoder options, which ffmpeg only accepts *before* -i because they
+    # configure the input side. "{s}" is substituted with the source index.
+    input_extra: list[str] = field(default_factory=list)
     disposition: str | None = None  # "default" | "0" | None (leave alone)
     title: str | None = None
+    language: str | None = None
     note: str = ""
 
     @property
@@ -54,6 +60,10 @@ class FilePlan:
     dropped: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     skip_reason: str | None = None
+    # Something a human has to decide, not work this tool can do. Deliberately
+    # not a reason: it must never make needs_work true, or a file nobody ever
+    # looks at would be re-planned and re-queued forever.
+    manual_review: str = ""
     height: int = 0
     src_video_codec: str = ""
     duration: float = 0.0
@@ -62,6 +72,27 @@ class FilePlan:
     @property
     def needs_work(self) -> bool:
         return self.skip_reason is None and bool(self.reasons)
+
+    @property
+    def encodes_video(self) -> bool:
+        return any(s.kind == "video" and s.is_encode for s in self.streams)
+
+    def without_video_encode(self) -> "FilePlan":
+        """The same run with the source video copied instead of re-encoded.
+
+        Used when an x265 pass comes back bigger than the source it replaced.
+        The encode is what failed to pay off, not the run: the stereo track
+        and the subtitle cleaning are still worth having, and the original
+        video stream is the best video this file is going to get.
+        """
+        fallback = copymod.deepcopy(self)
+        for s in fallback.streams:
+            if s.kind == "video" and s.is_encode:
+                s.codec, s.extra, s.input_extra = "copy", [], []
+                s.note = "x265 rejected, source video kept"
+        fallback.reasons = [r for r in self.reasons
+                            if not r.startswith("encode video ")]
+        return fallback
 
     @property
     def video_summary(self) -> str:
@@ -92,6 +123,7 @@ class FilePlan:
             "container": self.container,
             "needs_work": self.needs_work,
             "skip_reason": self.skip_reason,
+            "manual_review": self.manual_review,
             "height": self.height,
             "src_video_codec": self.src_video_codec,
             "duration": self.duration,
@@ -111,6 +143,7 @@ class FilePlan:
                     "action": "encode" if s.is_encode else "copy",
                     "disposition": s.disposition,
                     "title": s.title,
+                    "language": s.language,
                     "note": s.note,
                 }
                 for s in self.streams
@@ -179,21 +212,16 @@ def _plan_video(probe: Probe, lib: Profile, cfg: Config,
         plan.skip_reason = f"{plan.height}p above encode range"
         return False
 
-    if band == "sd":
-        # SD is cleaned but never re-encoded: x265 on an SD source costs more
-        # in quality than it saves in bytes.
-        plan.streams.insert(
-            0, StreamPlan(main["index"], "video", "copy", note="SD, copy")
-        )
-        return True
-
     if plan.src_video_codec in v.already_encoded:
         plan.streams.insert(
             0, StreamPlan(main["index"], "video", "copy", note="already HEVC")
         )
         return True
 
-    crf = v.crf_720p if band == "720p" else v.crf_1080p
+    # Each band gets its own CRF. SD has one of its own rather than borrowing
+    # the 720p value, because the same quantiser is a very different bitrate
+    # at 480 lines than at 720.
+    crf = {"sd": v.crf_sd, "720p": v.crf_720p}.get(band, v.crf_1080p)
     plan.streams.insert(0, StreamPlan(
         main["index"], "video", "libx265",
         extra=[
@@ -205,6 +233,23 @@ def _plan_video(probe: Probe, lib: Profile, cfg: Config,
     ))
     plan.reasons.append(f"encode video {plan.src_video_codec} -> x265 crf {crf}")
     return True
+
+
+# The standard downmix matrix, normalised so the fold-down sums instead of
+# clipping. Only reached for codecs that carry no coefficients of their own -
+# a hand-written pan matrix would be second-guessing the mix engineer.
+REMATRIX_FILTER = "aresample=rematrix_maxval=1.0"
+
+
+def _excluded(s: dict[str, Any], pattern: re.Pattern[str]) -> bool:
+    """True for a track that is about the film rather than its soundtrack.
+
+    Commentary, described audio, isolated scores. The dispositions come
+    first because they are the muxer's own statement about the track; the
+    title is checked as well because most releases only say it there.
+    """
+    return (is_comment(s) or is_visual_impaired(s)
+            or bool(pattern.search(title_of(s))))
 
 
 def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
@@ -220,52 +265,81 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
             )
         return
 
-    commentary_re = re.compile(a.commentary_pattern, re.I)
+    pattern = re.compile(a.commentary_pattern, re.I)
+    excluded = {id(s) for s in audio if _excluded(s, pattern)}
 
-    # "Most standard" = the track most likely to be the main soundtrack and to
-    # play everywhere: preferred language, not commentary, a normal channel
-    # layout, a widely supported codec. Bitrate only breaks ties.
-    def score(s: dict[str, Any]) -> float:
-        n = 0.0
-        langs = a.preferred_languages
-        lang = lang_of(s)
-        n += (len(langs) - langs.index(lang)) * 100 if lang in langs else 0
-        if commentary_re.search(title_of(s)):
-            n -= 1000
-        n += a.channel_score.get(str(channels_of(s)), 2)
-        n += a.codec_score.get(codec_of(s), 0)
-        try:
-            n += min(int(s.get("bit_rate") or 0), 1_536_000) / 1_000_000
-        except (TypeError, ValueError):
-            pass
-        return n
+    def wanted(s: dict[str, Any]) -> bool:
+        return lang_of(s) in a.preferred_languages
 
-    ranked = sorted(audio, key=score, reverse=True)
-    keep = ranked[0]
+    def is_stereo(s: dict[str, Any]) -> bool:
+        return channels_of(s) == 2
 
-    def is_stereo_target(s: dict[str, Any]) -> bool:
-        return codec_of(s) == a.stereo_codec and channels_of(s) == 2
+    def is_target_codec(s: dict[str, Any]) -> bool:
+        return codec_of(s) == a.stereo_codec
 
-    # Re-use a stereo downmix a previous run already created rather than
-    # deleting it and encoding an identical one, which is what makes repeat
-    # runs free. Commentary tracks are never adopted, or a re-run would
-    # promote the commentary to the default audio track of the file.
-    candidates = [
-        s for s in ranked[1:]
-        if is_stereo_target(s) and not commentary_re.search(title_of(s))
-    ]
-    existing = None
-    if is_stereo_target(keep) and not commentary_re.search(title_of(keep)):
-        existing = keep
-    else:
-        for pick in (
-            lambda s: title_of(s) == a.stereo_title and lang_of(s) == lang_of(keep),
-            lambda s: lang_of(s) == lang_of(keep),
-            lambda s: title_of(s) == a.stereo_title,
-        ):
-            existing = next((s for s in candidates if pick(s)), None)
-            if existing:
-                break
+    stereo: dict[str, Any] | None = None    # a 2.0 track already in the file
+    downmix: dict[str, Any] | None = None   # a surround track to fold down
+
+    if a.add_stereo_downmix:
+        # A 2.0 track that is already here *is* the stereo track - re-encoded
+        # to AAC below if it is not already, but never rebuilt out of the
+        # surround mix, which would be a second lossy generation for nothing.
+        # This is also what makes a repeat run free: the downmix the last run
+        # wrote is found here and copied.
+        ready = [s for s in audio
+                 if is_stereo(s) and wanted(s) and id(s) not in excluded]
+        if ready:
+            stereo = next((s for s in ready if is_target_codec(s)), ready[0])
+        else:
+            pool = [s for s in audio if wanted(s)
+                    and str(channels_of(s)) in a.downmix_channels]
+            candidates = [s for s in pool if id(s) not in excluded]
+            if candidates:
+                # Widest mix, then highest bitrate, then the earliest track:
+                # deterministic the whole way down, so the same file always
+                # resolves to the same source and a re-plan never wavers.
+                downmix = min(candidates, key=lambda s: (
+                    -channels_of(s), -bitrate_of(s), s["index"]))
+            elif pool:
+                # Every surround track in the file is commentary or described
+                # audio. Guessing here ships a film whose default track is a
+                # director talking over it, so nothing is downmixed and the
+                # file is flagged for a person to look at instead.
+                plan.manual_review = (
+                    "no stereo track made: every multichannel track is "
+                    "commentary or described audio")
+
+    have_stereo = stereo is not None or downmix is not None
+
+    keep = list(audio)
+    if a.keep_stereo_only and have_stereo:
+        # The stereo mix stands in for the surround masters, but for nothing
+        # that is commentary or description - there is no other copy of those
+        # in the file - so they are kept whatever this switch says.
+        keep = [s for s in audio if id(s) in excluded or s is stereo]
+
+    kept = {id(s) for s in keep}
+    for s in audio:
+        if id(s) not in kept:
+            plan.dropped.append(
+                f"audio {codec_of(s)} {channels_of(s)}ch {lang_of(s)}")
+            plan.reasons.append("drop extra audio")
+
+    if stereo is not None:
+        # Stereo first, so players that just grab track 1 get the safe one.
+        keep = [stereo] + [s for s in keep if s is not stereo]
+
+    def want(s: dict[str, Any], default: bool) -> str | None:
+        """The disposition to write, or None to leave the file's own alone.
+
+        Nothing is re-flagged when no stereo track came out of this run:
+        clearing every default would leave a file with no default track.
+        """
+        if not have_stereo:
+            return None
+        if is_default(s) is not default:
+            plan.reasons.append("fix audio disposition")
+        return "default" if default else "0"
 
     def stereo_name(s: dict[str, Any]) -> str | None:
         """Name an adopted stereo track, so it is obvious in a player.
@@ -280,78 +354,52 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
         plan.reasons.append("name the stereo track")
         return a.stereo_title
 
-    def want(s: dict[str, Any], default: bool) -> str:
-        if is_default(s) is not default:
-            plan.reasons.append("fix audio disposition")
-        return "default" if default else "0"
+    if downmix is not None:
+        extra = ["-ac:{i}", "2", "-b:{i}", a.stereo_bitrate]
+        input_extra: list[str] = []
+        request = a.downmix_request.split()
+        if request and codec_of(downmix) in a.downmix_metadata_codecs:
+            # This stream carries the mix engineer's own Lo/Ro coefficients.
+            # Asking the decoder for stereo applies them, which is a better
+            # fold-down than any matrix applied afterwards - and it is a
+            # decoder option, so it has to reach ffmpeg before -i.
+            input_extra = [request[0] + ":{s}", *request[1:]]
+        else:
+            extra += ["-filter:{i}", REMATRIX_FILTER]
+        plan.streams.append(StreamPlan(
+            downmix["index"], "audio", a.stereo_encoder,
+            extra=extra, input_extra=input_extra, disposition="default",
+            title=a.stereo_title, language=lang_of(downmix),
+            note=f"stereo downmix from {channels_of(downmix)}ch",
+        ))
+        plan.reasons.append(
+            f"downmix {codec_of(downmix)} {channels_of(downmix)}ch to "
+            f"{a.stereo_codec} stereo")
 
-    if not a.keep_best_only:
-        # Keep every track. A downmix is still added if one is wanted and
-        # none of the existing tracks already is one.
-        if a.add_stereo_downmix and existing is None:
+    for s in keep:
+        default = s is stereo
+        if a.add_stereo_downmix and is_stereo(s) and not is_target_codec(s):
+            # Already 2.0, wrong codec: transcoded in place. Keeping the
+            # source track beside its own AAC copy would leave the file
+            # carrying the same mix twice.
             plan.streams.append(StreamPlan(
-                keep["index"], "audio", a.stereo_encoder,
-                extra=["-ac:{i}", "2", "-b:{i}", a.stereo_bitrate],
-                disposition="default", title=a.stereo_title,
-                note="new stereo downmix",
+                s["index"], "audio", a.stereo_encoder,
+                extra=["-b:{i}", a.stereo_convert_bitrate],
+                disposition=want(s, default),
+                title=a.stereo_title if default else None,
+                language=lang_of(s),
+                note=f"{codec_of(s)} stereo re-encoded",
             ))
-            plan.reasons.append(f"add {a.stereo_encoder} stereo downmix")
-        for s in audio:
-            default = a.add_stereo_downmix and s is existing
-            plan.streams.append(StreamPlan(
-                s["index"], "audio", "copy",
-                disposition=want(s, default) if a.add_stereo_downmix else None,
-                title=stereo_name(s) if default else None,
-                note="kept",
-            ))
-        return
-
-    kept_ids = {id(keep)} | ({id(existing)} if existing and a.add_stereo_downmix
-                             else set())
-    for s in audio:
-        if id(s) not in kept_ids:
-            plan.dropped.append(f"audio {codec_of(s)} {channels_of(s)}ch {lang_of(s)}")
-            plan.reasons.append("drop extra audio")
-
-    if not a.add_stereo_downmix:
+            plan.reasons.append(
+                f"re-encode {codec_of(s)} stereo to {a.stereo_codec} "
+                f"{a.stereo_convert_bitrate}")
+            continue
         plan.streams.append(StreamPlan(
-            keep["index"], "audio", "copy",
-            disposition=want(keep, True), note="main track",
+            s["index"], "audio", "copy",
+            disposition=want(s, default) if a.add_stereo_downmix else None,
+            title=stereo_name(s) if default else None,
+            note="stereo" if default else "kept",
         ))
-        return
-
-    if existing is not None and existing is keep:
-        plan.streams.append(StreamPlan(
-            keep["index"], "audio", "copy",
-            disposition=want(keep, True), title=stereo_name(keep),
-            note="already AAC stereo",
-        ))
-        return
-
-    if existing is not None:
-        # Stereo downmix first so players that grab track 1 get the safe one.
-        plan.streams.append(StreamPlan(
-            existing["index"], "audio", "copy",
-            disposition=want(existing, True), title=stereo_name(existing),
-            note="existing stereo",
-        ))
-        plan.streams.append(StreamPlan(
-            keep["index"], "audio", "copy",
-            disposition=want(keep, False), note="main track",
-        ))
-        return
-
-    # No usable stereo track: add one, downmixed from the track we keep.
-    plan.streams.append(StreamPlan(
-        keep["index"], "audio", a.stereo_encoder,
-        extra=["-ac:{i}", "2", "-b:{i}", a.stereo_bitrate],
-        disposition="default", title=a.stereo_title, note="new stereo downmix",
-    ))
-    plan.streams.append(StreamPlan(
-        keep["index"], "audio", "copy",
-        disposition=want(keep, False), note="main track",
-    ))
-    plan.reasons.append(f"add {a.stereo_encoder} stereo downmix")
 
 
 # What each container can actually mux. ffmpeg refuses to write the header for

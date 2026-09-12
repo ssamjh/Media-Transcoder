@@ -33,6 +33,7 @@ from typing import Any
 class VideoCfg:
     enabled: bool = True
     preset: str = "medium"
+    crf_sd: int = 23
     crf_720p: int = 23
     crf_1080p: int = 22
     sd_max_height: int = 576
@@ -45,23 +46,26 @@ class VideoCfg:
 @dataclass
 class AudioCfg:
     enabled: bool = True
-    keep_best_only: bool = True
     add_stereo_downmix: bool = True
-    preferred_languages: list[str] = field(default_factory=lambda: ["eng", "und"])
-    stereo_encoder: str = "aac"
+    keep_stereo_only: bool = False
+    preferred_languages: list[str] = field(default_factory=lambda: ["eng"])
+    downmix_channels: list[str] = field(default_factory=lambda: ["6", "8"])
+    # Codecs whose bitstream carries the mix engineer's own Lo/Ro downmix
+    # coefficients. For these the decoder is asked for stereo directly, which
+    # is a better fold-down than any matrix this tool could apply.
+    downmix_metadata_codecs: list[str] = field(
+        default_factory=lambda: ["ac3", "eac3", "dts", "truehd"]
+    )
+    downmix_request: str = "-downmix stereo"
+    stereo_encoder: str = "auto"
     stereo_codec: str = "aac"
     stereo_bitrate: str = "160k"
+    stereo_convert_bitrate: str = "192k"
     stereo_title: str = "Stereo"
-    channel_score: dict[str, int] = field(
-        default_factory=lambda: {"6": 30, "8": 22, "2": 16, "1": 6}
+    commentary_pattern: str = (
+        r"commentary|comment|director|cast|crew|isolated|descriptive"
+        r"|audio description|narration|sign language"
     )
-    codec_score: dict[str, int] = field(
-        default_factory=lambda: {
-            "ac3": 14, "eac3": 14, "aac": 12, "dts": 10,
-            "truehd": 8, "flac": 6, "opus": 6, "mp3": 4,
-        }
-    )
-    commentary_pattern: str = r"commentary|descriptive|narration|audio description"
 
 
 @dataclass
@@ -398,6 +402,10 @@ MODE_META: dict[str, dict[str, Any]] = {
         "desc": "x265 preset. Slower is smaller and takes longer.",
         "choices": ["ultrafast", "superfast", "veryfast", "faster", "fast",
                     "medium", "slow", "slower", "veryslow"]},
+    "video.crf_sd": {
+        "desc": "Quality for SD sources. Separate from the HD bands because "
+                "x265 at an HD CRF is wasteful on a 480p source.",
+        "min": 0, "max": 51},
     "video.crf_720p": {
         "desc": "Quality for 720p sources. Lower is bigger and better.",
         "min": 0, "max": 51},
@@ -405,8 +413,8 @@ MODE_META: dict[str, dict[str, Any]] = {
         "desc": "Quality for 1080p sources. Lower is bigger and better.",
         "min": 0, "max": 51},
     "video.sd_max_height": {
-        "desc": "At or below this height a file is cleaned and remuxed but "
-                "never re-encoded.", "min": 0, "max": 4320},
+        "desc": "At or below this height a file is treated as SD and encoded "
+                "with video.crf_sd.", "min": 0, "max": 4320},
     "video.h720_max_height": {
         "desc": "Upper bound of the 720p band.", "min": 0, "max": 4320},
     "video.h1080_max_height": {
@@ -420,26 +428,55 @@ MODE_META: dict[str, dict[str, Any]] = {
     "audio.enabled": {
         "desc": "Touch audio at all. Turn off to copy every audio track "
                 "unchanged."},
-    "audio.keep_best_only": {
-        "desc": "Drop every audio track except the best one. Turn off to keep "
-                "them all."},
     "audio.add_stereo_downmix": {
-        "desc": "Add an AAC 2.0 downmix as the default track, for players that "
-                "handle surround badly. An existing one is re-used, not rebuilt."},
+        "desc": "Make sure the file ends up with an AAC 2.0 track, set default, "
+                "for players that handle surround badly. An existing stereo "
+                "track is re-used - converted to AAC if it is not already - "
+                "and only a file with none gets one folded down from its "
+                "surround mix. Off copies every track exactly as it arrived."},
+    "audio.keep_stereo_only": {
+        "desc": "Once the stereo track exists, drop every other audio track. "
+                "Commentary and described audio are always kept, because "
+                "nothing else in the file stands in for them. Off keeps every "
+                "original track alongside the stereo one."},
     "audio.preferred_languages": {
-        "desc": "Language tags preferred when choosing the main track, best first."},
-    "audio.stereo_encoder": {"desc": "Encoder used for the stereo downmix."},
+        "desc": "Language tags a track must carry to be considered for the "
+                "stereo track, either as one already there or as the surround "
+                "mix folded down."},
+    "audio.downmix_channels": {
+        "desc": "Channel counts eligible to be folded down to stereo. The "
+                "widest track wins, then the highest bitrate, then the lowest "
+                "stream index."},
+    "audio.downmix_request": {
+        "desc": "Decoder option asking for a stereo fold-down, applied to the "
+                "codecs listed above. This was -request_channel_layout stereo "
+                "until ffmpeg 7 removed it in favour of -downmix; both mean "
+                "\"decode to stereo using the coefficients in the bitstream\". "
+                "Blank falls back to the matrix downmix for every codec."},
+    "audio.downmix_metadata_codecs": {
+        "desc": "Codecs that carry their own Lo/Ro downmix coefficients. These "
+                "are folded down by the decoder, which applies the mix "
+                "engineer's own settings; anything else uses the standard "
+                "matrix, normalised so the sum cannot clip."},
+    "audio.stereo_encoder": {
+        "desc": "AAC encoder. \"auto\" uses libfdk_aac when this ffmpeg build "
+                "has it and the native encoder otherwise.",
+        "choices": ["auto", "aac", "libfdk_aac"]},
     "audio.stereo_codec": {
         "desc": "Codec name the encoder produces, used to recognise an existing "
-                "downmix so it is re-used instead of rebuilt."},
-    "audio.stereo_bitrate": {"desc": "Bitrate for the stereo downmix."},
-    "audio.stereo_title": {"desc": "Title tag written on the stereo downmix."},
-    "audio.channel_score": {
-        "desc": "Channel count to score, when picking the main track."},
-    "audio.codec_score": {"desc": "Codec to score, when picking the main track."},
+                "stereo track so it is re-used instead of rebuilt."},
+    "audio.stereo_bitrate": {
+        "desc": "Bitrate for a stereo track folded down from a surround mix."},
+    "audio.stereo_convert_bitrate": {
+        "desc": "Bitrate for a track that was already 2.0 and is only being "
+                "re-encoded to AAC. Higher than the downmix bitrate, because "
+                "it is a straight transcode of the mix rather than a fold-down."},
+    "audio.stereo_title": {"desc": "Title tag written on the stereo track."},
     "audio.commentary_pattern": {
-        "desc": "Regex matched against track titles to detect commentary, which "
-                "is never chosen as the main or stereo track."},
+        "desc": "Regex matched against track titles to detect commentary and "
+                "described audio, which is never folded down to stereo and is "
+                "never dropped by keep_stereo_only. The comment and "
+                "visual_impaired dispositions are honoured as well."},
 
     "subtitles.enabled": {
         "desc": "Touch subtitles at all. Turn off to copy every subtitle track "
@@ -474,9 +511,12 @@ MODE_META: dict[str, dict[str, Any]] = {
         "min": 0.0, "max": 1.0},
     "output.max_size_ratio": {
         "desc": "Reject an encode larger than this fraction of the source. "
-                "1.0 means it must shrink; a little over 1 allows for a run "
-                "that adds a stereo track to an already-efficient file. 10 "
-                "effectively turns the ceiling off.",
+                "Only asked of a run that actually re-encoded the video - a "
+                "run that copied it has no way to shrink the file and every "
+                "reason to grow it slightly. A rejected x265 pass is rebuilt "
+                "around the source video stream rather than thrown away, so "
+                "the audio and subtitle work still lands. 10 effectively "
+                "turns the ceiling off.",
         "min": 0.1, "max": 10.0},
 
     "notify.enabled": {
@@ -1100,6 +1140,20 @@ def _migrate_settings(raw: dict[str, Any]) -> dict[str, Any]:
         output.setdefault("max_size_ratio", 1.0 if must_shrink else 10.0)
         output.setdefault("min_size_ratio", 0.0)
         out["output"] = output
+
+    audio = dict(out.get("audio") or {})
+    if audio:
+        # Track selection used to be a scoring contest that picked one "best"
+        # track to keep. It is now an explicit rule - widest surround track in
+        # a wanted language, commentary excluded - so the score tables have
+        # nothing left to weigh, and "keep only the best" has become "keep
+        # only the stereo track", which is the same intent one step on.
+        if "keep_best_only" in audio:
+            audio.setdefault("keep_stereo_only", bool(audio.pop("keep_best_only")))
+            audio.pop("keep_best_only", None)
+        audio.pop("channel_score", None)
+        audio.pop("codec_score", None)
+        out["audio"] = audio
     return out
 
 

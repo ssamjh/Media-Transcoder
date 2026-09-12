@@ -7,6 +7,7 @@ encoder, which silently produces H.264 for mkv.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
@@ -34,6 +35,36 @@ WORK_PREFIX = "transcode-"
 
 ProgressCb = Callable[[float, float], None]  # (percent 0-100, speed multiplier)
 
+# A plan asks for this rather than a concrete AAC encoder, because which one
+# exists is a property of the ffmpeg binary, not of the library's settings -
+# and planning has to stay pure, so the question is asked here instead.
+AAC_AUTO = "auto"
+
+
+@functools.cache
+def aac_encoder() -> str:
+    """libfdk_aac if this build has it, else the native encoder.
+
+    Cached: the answer cannot change without restarting the process, and
+    every downmix would otherwise shell out to ask again.
+    """
+    try:
+        res = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-encoders"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("could not list ffmpeg encoders (%s); using aac", exc)
+        return "aac"
+    if res.returncode == 0 and re.search(r"^\s*\S+\s+libfdk_aac\b",
+                                         res.stdout, re.M):
+        return "libfdk_aac"
+    return "aac"
+
+
+def encoder_for(codec: str) -> str:
+    return aac_encoder() if codec == AAC_AUTO else codec
+
 
 class EncodeError(RuntimeError):
     pass
@@ -45,6 +76,9 @@ class EncodeResult:
     in_size: int
     out_size: int
     elapsed: float
+    # Whether this run actually re-encoded the video, which is the only case
+    # in which "did it come out smaller" is a fair question to ask of it.
+    video_encoded: bool = True
 
     @property
     def saved(self) -> int:
@@ -57,8 +91,16 @@ class EncodeResult:
 
 def build_args(plan: FilePlan, dest: str | Path) -> list[str]:
     """Build the full ffmpeg argument list for a plan."""
+    # Decoder options configure the input, so ffmpeg only accepts them ahead
+    # of -i. They are scoped to their own source stream, which is why a track
+    # being copied from the same file is untouched by them.
+    decoder: list[str] = []
+    for sp in plan.streams:
+        decoder += [a.replace("{s}", str(sp.src_index)) for a in sp.input_extra]
+
     args = [
         FFMPEG, "-hide_banner", "-nostdin", "-y",
+        *decoder,
         "-i", str(plan.path),
         "-map_metadata", "0",
         "-map_chapters", "0",
@@ -67,12 +109,14 @@ def build_args(plan: FilePlan, dest: str | Path) -> list[str]:
 
     for out_index, sp in enumerate(plan.streams):
         args += ["-map", f"0:{sp.src_index}"]
-        args += [f"-c:{out_index}", sp.codec]
+        args += [f"-c:{out_index}", encoder_for(sp.codec)]
         args += [a.replace("{i}", str(out_index)) for a in sp.extra]
         if sp.disposition is not None:
             args += [f"-disposition:{out_index}", sp.disposition]
         if sp.title is not None:
             args += [f"-metadata:s:{out_index}", f"title={sp.title}"]
+        if sp.language is not None:
+            args += [f"-metadata:s:{out_index}", f"language={sp.language}"]
 
     args += ["-progress", "pipe:1", "-nostats", str(dest)]
     return args
@@ -229,6 +273,7 @@ def encode(plan: FilePlan, cfg: Config, on_progress: ProgressCb | None = None,
         in_size=in_size,
         out_size=dest.stat().st_size,
         elapsed=time.monotonic() - started,
+        video_encoded=plan.encodes_video,
     )
 
 
@@ -240,18 +285,33 @@ def discard(result: EncodeResult) -> None:
 COPY_CHUNK = 8 * 1024 * 1024
 
 
-def size_verdict(in_size: int, out_size: int, out_cfg: LibOutputCfg) -> str | None:
+def over_ceiling(in_size: int, out_size: int, out_cfg: LibOutputCfg) -> bool:
+    """True if the output is bigger than the library is willing to accept."""
+    if not in_size or not out_cfg.max_size_ratio:
+        return False
+    return out_size / in_size > out_cfg.max_size_ratio
+
+
+def size_verdict(in_size: int, out_size: int, out_cfg: LibOutputCfg,
+                 video_encoded: bool = True) -> str | None:
     """None if the encode is an acceptable size, else why it was rejected.
 
     "Smaller than the source" is the wrong question once a run can add a
     stereo track: a file that was already efficient can legitimately come
     back slightly larger, while one that comes back at a tenth of the size
     has almost certainly lost something the other checks did not catch.
+
+    The ceiling is only asked of a run that re-encoded the video, because it
+    is really asking whether that encode paid off. A run that copied the
+    video has no way to make the file smaller and every reason to make it
+    slightly bigger, so failing it on size would reject every cleanup pass.
+    The floor still applies either way - an output at a tenth of the source
+    means something was lost, however the video got there.
     """
     if not in_size:
         return None
     pct = out_size / in_size * 100
-    if out_cfg.max_size_ratio and pct > out_cfg.max_size_ratio * 100:
+    if video_encoded and over_ceiling(in_size, out_size, out_cfg):
         return (f"output was {pct:.1f}% of the source, over the "
                 f"{out_cfg.max_size_ratio * 100:.0f}% ceiling")
     if out_cfg.min_size_ratio and pct < out_cfg.min_size_ratio * 100:
@@ -297,7 +357,8 @@ def replace_original(src: Path, result: EncodeResult, cfg: Config,
     an os.replace on one filesystem - if the process dies mid-copy the
     library still holds a complete file, never a half-written one.
     """
-    if size_verdict(result.in_size, result.out_size, profile.output):
+    if size_verdict(result.in_size, result.out_size, profile.output,
+                    result.video_encoded):
         shutil.rmtree(result.out_path.parent, ignore_errors=True)
         return False
 

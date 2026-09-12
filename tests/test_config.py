@@ -60,7 +60,7 @@ class TestRoundTrip(unittest.TestCase):
         c = three_libraries()
         for lib_id, updates in [
             ("tv", {"video.crf_1080p": 19, "subtitles.enabled": False,
-                    "audio.keep_best_only": False}),
+                    "audio.keep_stereo_only": True}),
             ("movies", {"video.enabled": False, "output.container": "keep",
                         "audio.stereo_bitrate": "192k"}),
             ("home-video", {"audio.enabled": False,
@@ -105,12 +105,12 @@ class TestRoundTrip(unittest.TestCase):
                          mode.audio.stereo_title)
         self.assertEqual(back.libraries[0].name, c.libraries[0].name)
 
-    def test_dict_fields_survive(self):
+    def test_list_fields_survive(self):
         c = one_library()
-        cfgmod.apply_mode_updates(c, mode_of(c),
-                                  {"audio.channel_score": {"6": 40, "2": 10}})
+        cfgmod.apply_mode_updates(
+            c, mode_of(c), {"audio.downmix_channels": ["6", "8", "7"]})
         back = cfgmod.loads(cfgmod.dump_toml(c))
-        self.assertEqual(mode_of(back).audio.channel_score, {"6": 40, "2": 10})
+        self.assertEqual(mode_of(back).audio.downmix_channels, ["6", "8", "7"])
 
     def test_empty_string_entry_is_preserved(self):
         """"" means "no language tag" in undefined_languages."""
@@ -370,7 +370,7 @@ class TestSchema(unittest.TestCase):
         m = {f["key"]: f["type"] for block in
              cfgmod.mode_schema(cfgmod.ModeCfg())
              for f in block["fields"]}
-        self.assertEqual(m["audio.channel_score"], "map")
+        self.assertEqual(m["audio.downmix_channels"], "list")
         self.assertEqual(m["video.preset"], "str")
         self.assertEqual(m["video.enabled"], "bool")
 

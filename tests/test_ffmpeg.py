@@ -188,8 +188,10 @@ class SizeVerdictTest(unittest.TestCase):
     def setUp(self):
         self.out = LibOutputCfg()
 
-    def verdict(self, percent: float, in_size: int = 1_000_000):
-        return ffmpeg.size_verdict(in_size, int(in_size * percent / 100), self.out)
+    def verdict(self, percent: float, in_size: int = 1_000_000,
+                video_encoded: bool = True):
+        return ffmpeg.size_verdict(in_size, int(in_size * percent / 100),
+                                   self.out, video_encoded)
 
     def test_the_default_window_accepts_a_normal_encode(self):
         for percent in (30, 55, 100, 110):
@@ -217,3 +219,37 @@ class SizeVerdictTest(unittest.TestCase):
 
     def test_an_unknown_source_size_is_not_judged(self):
         self.assertIsNone(ffmpeg.size_verdict(0, 5_000_000, self.out))
+
+    def test_the_ceiling_only_applies_to_a_real_encode(self):
+        """It asks whether the x265 pass paid off, which a copy cannot answer."""
+        self.assertIsNone(self.verdict(140, video_encoded=False))
+        self.assertIsNotNone(self.verdict(140, video_encoded=True))
+
+    def test_the_floor_applies_either_way(self):
+        """A tenth of the source means something was lost, however it got there."""
+        for encoded in (True, False):
+            with self.subTest(video_encoded=encoded):
+                self.assertIn("floor", self.verdict(8, video_encoded=encoded))
+
+    def test_over_ceiling_is_the_ceiling_on_its_own(self):
+        """The engine asks this to tell "too big" from "lost something"."""
+        self.assertTrue(ffmpeg.over_ceiling(1_000_000, 1_400_000, self.out))
+        self.assertFalse(ffmpeg.over_ceiling(1_000_000, 80_000, self.out))
+        self.assertFalse(ffmpeg.over_ceiling(0, 1_400_000, self.out))
+
+
+class EncoderChoiceTest(unittest.TestCase):
+    """A plan names a logical AAC encoder; the binary decides which it is."""
+
+    def test_auto_resolves_to_something_real(self):
+        self.assertIn(ffmpeg.encoder_for(ffmpeg.AAC_AUTO),
+                      ("aac", "libfdk_aac"))
+
+    def test_an_explicit_encoder_is_passed_straight_through(self):
+        for codec in ("copy", "libx265", "aac", "libfdk_aac", "srt"):
+            self.assertEqual(ffmpeg.encoder_for(codec), codec)
+
+    def test_the_answer_is_cached(self):
+        """It cannot change without a restart, and every downmix asks."""
+        self.assertEqual(ffmpeg.aac_encoder(), ffmpeg.aac_encoder())
+        self.assertGreaterEqual(ffmpeg.aac_encoder.cache_info().hits, 1)

@@ -27,13 +27,37 @@ Each is independently switchable per library.
 
 | Stage | When enabled | When disabled |
 | --- | --- | --- |
-| **Video** | 720p → x265 CRF 23, 1080p → CRF 22. Already-HEVC is copied, never re-encoded. SD (≤576p) cleaned but not re-encoded. Above 1200p left alone entirely. | Every video stream copied untouched, and the height ceiling no longer applies — a 4K file still gets its audio and subtitles cleaned. |
-| **Audio** | Keeps the best track — preferred language, not commentary, sane channel layout, widely supported codec — plus an AAC 2.0 downmix as default, titled `Stereo` (`audio.stereo_title`) whether it was encoded or adopted. An existing stereo track is re-used, not rebuilt. `keep_best_only` and `add_stereo_downmix` are separate switches. | Every audio track copied untouched, dispositions left alone. |
+| **Video** | SD (≤576p) → x265 CRF 23, 720p → CRF 23, 1080p → CRF 22, each band with its own configurable CRF. Already-HEVC is copied, never re-encoded. Above 1200p left alone entirely. | Every video stream copied untouched, and the height ceiling no longer applies — a 4K file still gets its audio and subtitles cleaned. |
+| **Audio** | Every file ends up with an AAC 2.0 track, default, titled `Stereo` (`audio.stereo_title`). A track that is already 2.0 is used — re-encoded to AAC at 192k if it is not already — and only a file with none gets one folded down from its widest surround mix at 160k. `keep_stereo_only` then drops the other tracks; off (the default) keeps them all. Commentary and described audio are never folded down and never dropped. | Every audio track copied untouched, dispositions left alone. |
 | **Subtitles** | Keeps configured languages only. If none match and there is exactly one *unlabelled* track, that one is kept. A text track the target container cannot carry — `mov_text` from an MP4, say — is converted to SubRip rather than copied, since Matroska refuses it at the muxer. | Every subtitle track copied, converted to SubRip if the container demands it. |
-| **Output** | Container normalised to MKV (or `keep` to leave the extension alone), cover art dropped, originals replaced once verified and inside the size window (30%–110% of the source by default). | — |
+| **Output** | Container normalised to MKV (or `keep` to leave the extension alone), cover art dropped, originals replaced once verified and inside the size window (30%–110% of the source by default). The 110% ceiling is only asked of a run that re-encoded the video; one rejected by it is rebuilt around the source video stream so the audio and subtitle work still lands. | — |
 | **Notifications** | Once the verified file is back in place, calls the URLs you list — Jellyfin, Plex, anything with an HTTP endpoint. Queued and delivered in the background. | Nothing is called. |
 
 Chapters and metadata are always preserved.
+
+### How the stereo track is made
+
+Picking the wrong source is the failure that matters here — a film whose
+default track is a director talking over it — so the choice is explicit rather
+than scored:
+
+1. A 2.0 track already in the file wins. Folding the surround mix down when a
+   stereo mix exists is a second lossy generation for nothing.
+2. Otherwise, candidates are tracks in `audio.preferred_languages` with a
+   channel count in `audio.downmix_channels` (6 or 8). Anything carrying the
+   `comment` or `visual_impaired` disposition, or a title matching
+   `audio.commentary_pattern`, is excluded. Widest mix wins, then highest
+   bitrate, then lowest stream index.
+3. If exclusion empties the candidate list, **nothing is downmixed**. The file
+   is logged and flagged for review instead of guessed at.
+
+The fold-down itself uses the decoder (`audio.downmix_request`, `-downmix
+stereo`) for codecs that carry their own Lo/Ro coefficients — AC-3, E-AC-3,
+DTS, TrueHD — so the mix engineer's own settings are applied. Anything else
+falls back to the standard matrix, normalised with
+`aresample=rematrix_maxval=1.0` so the sum cannot clip. There is no hand-written
+pan matrix and no centre-channel boost. libfdk_aac is used when the ffmpeg
+build has it and the native `aac` encoder otherwise; both at constant bitrate.
 
 ## Quick start
 

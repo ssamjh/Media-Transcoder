@@ -253,6 +253,8 @@ class Engine:
 
     def _record(self, p: Path, plan: FilePlan) -> str:
         """Store a plan against a file and return the status it implies."""
+        if plan.manual_review:
+            log.warning("%s needs a look: %s", p.name, plan.manual_review)
         try:
             st = p.stat()
             size, mtime = st.st_size, st.st_mtime
@@ -506,6 +508,32 @@ class Engine:
             return ffmpeg.replace_original(src, result, self.cfg, profile,
                                            on_progress=copied)
 
+    def _rebuild_without_encode(self, job: ActiveJob, src: Path, plan: FilePlan,
+                                profile: Profile, progress: Any,
+                                cancelled: Any) -> ffmpeg.EncodeResult | None:
+        """Run the job again with the source video copied. None if that failed.
+
+        Reached when the x265 pass came back bigger than the file it would
+        replace. Only the encode failed to pay off - the stereo track and the
+        subtitle cleaning still have, and the source video stream is the best
+        video this file is going to get - so the run is rebuilt around it
+        instead of being thrown away whole.
+        """
+        job.stage, job.percent, job.speed = "encoding", 0.0, 0.0
+        job.stage_started = time.time()
+        try:
+            result = ffmpeg.encode(plan, self.cfg, on_progress=progress,
+                                   cancel=cancelled)
+        except ffmpeg.EncodeError as exc:
+            log.error("rebuild without the x265 pass failed for %s: %s",
+                      src.name, exc)
+            return None
+        # replace_original cleans up after itself when it refuses, so a
+        # rejection here needs nothing more than the original left in place.
+        if not self._copy_back(job, src, result, profile):
+            return None
+        return result
+
     def _process_one(self, path: str) -> str:
         p = Path(path)
         if not p.exists():
@@ -542,6 +570,8 @@ class Engine:
             return "failed"
 
         plan = plan_file(probe, profile, self.cfg)
+        if plan.manual_review:
+            log.warning("%s needs a look: %s", p.name, plan.manual_review)
         if not plan.needs_work:
             self._record(p, plan_file(probe, resolve(self.cfg, lib), self.cfg)
                          if mode else plan)
@@ -601,23 +631,48 @@ class Engine:
                                result.elapsed, note, detail)
             return "skip"
 
+        # Set once the x265 pass was rejected for size and the run was rebuilt
+        # around the source video. It is also the signal that the file has to
+        # settle rather than stay pending: the encode would be rejected again
+        # on every scan from now until someone changes the settings.
+        rebuilt = ""
         if not self._copy_back(job, p, result, profile):
-            note = (ffmpeg.size_verdict(result.in_size, result.out_size,
-                                        profile.output)
-                    or "output was rejected") + ", original kept"
-            self.db.upsert(path, status="skip", error=note,
-                           in_size=result.in_size, out_size=result.out_size)
-            self.db.finish_run(run_id, "rejected", result.in_size, result.out_size,
-                               result.elapsed, note, detail)
-            log.info("%s: %s", p.name, note)
-            return "skip"
+            note = ffmpeg.size_verdict(result.in_size, result.out_size,
+                                       profile.output,
+                                       result.video_encoded) or "output was rejected"
+            retry = None
+            if result.video_encoded and ffmpeg.over_ceiling(
+                    result.in_size, result.out_size, profile.output):
+                log.info("%s: %s; rebuilding with the source video stream",
+                         p.name, note)
+                plan = plan.without_video_encode()
+                retry = self._rebuild_without_encode(job, p, plan, profile,
+                                                     progress, cancelled)
+            if retry is None:
+                note += ", original kept"
+                self.db.upsert(path, status="skip", error=note,
+                               in_size=result.in_size, out_size=result.out_size)
+                self.db.finish_run(run_id, "rejected", result.in_size,
+                                   result.out_size, result.elapsed, note, detail)
+                log.info("%s: %s", p.name, note)
+                return "skip"
+            rebuilt = note + ", kept the source video stream"
+            result = retry
+            detail = plan.to_dict()
+            detail["mode"] = mode
+            detail["in_size"], detail["out_size"] = result.in_size, result.out_size
 
         final = p.with_suffix("." + plan.container)
         if final != p:
             self.db.forget(path)
         st = final.stat()
         status, reasons = "done", plan.reasons
-        if mode:
+        if rebuilt:
+            # Settled, not done: the library still wants an x265 encode this
+            # file will never accept, and leaving it pending would re-run the
+            # whole rejected pass on every scan.
+            status, reasons = "skip", plan.reasons
+        elif mode:
             # The mode is spent. Re-plan the result under the library's own
             # profile, so the next scan sees the truth without re-probing: a
             # cleanup run leaves a file still owing an x265 encode.
@@ -631,11 +686,11 @@ class Engine:
         self.db.upsert(
             str(final), size=st.st_size, mtime=st.st_mtime, status=status,
             library=lib.id, last_run=time.time(), in_size=result.in_size,
-            out_size=result.out_size, error=None, plan=detail,
+            out_size=result.out_size, error=rebuilt or None, plan=detail,
             reasons=reasons,
         )
         self.db.finish_run(run_id, "done", result.in_size, result.out_size,
-                           result.elapsed, None, detail)
+                           result.elapsed, rebuilt or None, detail)
         # Only now, with the verified encode in place of the original, is it
         # true to tell anyone else the file changed. `profile` and not `lib`,
         # so a mode can add or replace the callbacks for this one request -

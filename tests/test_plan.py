@@ -15,9 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import config as cfgmod          # noqa: E402
 from app.config import Config             # noqa: E402
-from app.ffmpeg import build_args         # noqa: E402
+from app.ffmpeg import AAC_AUTO, build_args, encoder_for  # noqa: E402
 from app.plan import plan_file            # noqa: E402
 from app.probe import Probe               # noqa: E402
+
+
+# A plan names the logical AAC encoder; which real one that is depends on
+# the ffmpeg build and is only resolved when the arguments are built.
+ENCODER = AAC_AUTO
 
 
 def V(index, codec="h264", height=1080, attached=False):
@@ -28,13 +33,16 @@ def V(index, codec="h264", height=1080, attached=False):
     }
 
 
-def A(index, codec="eac3", channels=6, lang="eng", title=None, default=0, bitrate=None):
+def A(index, codec="eac3", channels=6, lang="eng", title=None, default=0,
+      bitrate=None, comment=0, visual_impaired=0):
     tags = {"language": lang}
     if title:
         tags["title"] = title
     s = {
         "index": index, "codec_type": "audio", "codec_name": codec,
-        "channels": channels, "tags": tags, "disposition": {"default": default},
+        "channels": channels, "tags": tags,
+        "disposition": {"default": default, "comment": comment,
+                        "visual_impaired": visual_impaired},
     }
     if bitrate:
         s["bit_rate"] = str(bitrate)
@@ -99,11 +107,19 @@ class TestVideo(Base):
         self.assertTrue(p.needs_work)
         self.assertEqual(p.reasons, ["fix audio disposition"])
 
-    def test_sd_is_cleaned_but_never_encoded(self):
-        p = self.plan([V(0, "h264", 480), A(1), A(2, lang="fre")])
+    def test_sd_encodes_at_its_own_crf(self):
+        """SD is its own band: the same CRF is a different bitrate at 480p."""
+        self.mode.video.crf_sd = 25
+        p = self.plan([V(0, "h264", 480), A(1)])
+        self.assertEqual(p.streams[0].codec, "libx265")
+        self.assertIn("25", p.streams[0].extra)
+        self.assertIn("encode video h264 -> x265 crf 25", p.reasons)
+
+    def test_sd_that_is_already_hevc_is_still_copied(self):
+        p = self.plan([V(0, "hevc", 480),
+                       A(1, "aac", 2, "eng", title="Stereo", default=1)])
         self.assertEqual(p.streams[0].codec, "copy")
-        self.assertTrue(p.needs_work)
-        self.assertIn("drop extra audio", p.reasons)
+        self.assertFalse(p.needs_work)
 
     def test_1440p_and_above_skipped_entirely(self):
         for h in (1440, 2160):
@@ -129,6 +145,7 @@ class TestStageSwitches(Base):
 
     def test_video_disabled_copies_video_but_still_cleans(self):
         self.mode.video.enabled = False
+        self.mode.audio.keep_stereo_only = True
         p = self.plan([V(0, "h264", 1080), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre"), S(3, "eng"), S(4, "jpn")])
         self.assertEqual(p.streams[0].codec, "copy")
@@ -167,6 +184,7 @@ class TestStageSwitches(Base):
     def test_clean_audio_but_not_subtitles(self):
         """The example from the brief."""
         self.mode.subtitles.enabled = False
+        self.mode.audio.keep_stereo_only = True
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre"), S(3, "fre"), S(4, "jpn")])
         self.assertEqual(len(self.kinds(p, "subtitle")), 2)
@@ -182,24 +200,34 @@ class TestStageSwitches(Base):
         self.assertFalse(p.needs_work)
         self.assertEqual(len(p.streams), 3)
 
-    def test_keep_best_only_off_keeps_every_track(self):
-        self.mode.audio.keep_best_only = False
+    def test_every_original_track_is_kept_by_default(self):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre")])
         audio = self.kinds(p, "audio")
         self.assertEqual(len(audio), 3)          # both originals plus a downmix
-        self.assertEqual(audio[0].codec, "aac")
+        self.assertEqual(audio[0].codec, ENCODER)
         self.assertNotIn("drop extra audio", p.reasons)
 
-    def test_no_stereo_downmix_keeps_just_the_best_track(self):
-        self.mode.audio.add_stereo_downmix = False
+    def test_keep_stereo_only_drops_the_surround_masters(self):
+        self.mode.audio.keep_stereo_only = True
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre")])
         audio = self.kinds(p, "audio")
         self.assertEqual(len(audio), 1)
-        self.assertEqual(audio[0].src_index, 1)
+        self.assertEqual(audio[0].codec, ENCODER)
+        self.assertEqual(audio[0].src_index, 1)   # downmixed from the 5.1 eng
         self.assertEqual(audio[0].disposition, "default")
-        self.assertNotIn("add aac stereo downmix", p.reasons)
+        self.assertIn("drop extra audio", p.reasons)
+
+    def test_no_stereo_downmix_leaves_audio_exactly_as_it_came(self):
+        self.mode.audio.add_stereo_downmix = False
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
+                       A(2, "ac3", 2, "fre")])
+        audio = self.kinds(p, "audio")
+        self.assertEqual(len(audio), 2)
+        self.assertTrue(all(s.codec == "copy" for s in audio))
+        self.assertTrue(all(s.disposition is None for s in audio))
+        self.assertFalse(p.needs_work)
 
     def test_container_keep_avoids_a_pointless_remux(self):
         self.mode.output.container = "keep"
@@ -242,12 +270,12 @@ class TestSubtitles(Base):
 
 
 class TestAudio(Base):
-    def test_keeps_best_track_and_adds_stereo(self):
+    def test_the_downmix_leads_and_the_original_is_demoted(self):
         p = self.plan([V(0), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre")])
         audio = self.kinds(p, "audio")
-        self.assertEqual(len(audio), 2)
-        self.assertEqual(audio[0].codec, "aac")
+        self.assertEqual(audio[0].codec, ENCODER)
+        self.assertEqual(audio[0].src_index, 1)
         self.assertEqual(audio[0].disposition, "default")
         self.assertEqual(audio[1].codec, "copy")
         self.assertEqual(audio[1].src_index, 1)
@@ -257,9 +285,11 @@ class TestAudio(Base):
         p = self.plan([V(0), A(1, "eac3", 6, "eng", default=1),
                        A(2, "aac", 2, "eng", title="Commentary")])
         audio = self.kinds(p, "audio")
-        self.assertNotIn(2, [s.src_index for s in audio])
-        self.assertEqual(audio[0].codec, "aac")
+        # The commentary is kept, but the downmix comes off the 5.1 master.
+        self.assertEqual(audio[0].codec, ENCODER)
         self.assertEqual(audio[0].src_index, 1)
+        self.assertEqual(audio[0].title, "Stereo")
+        self.assertIn(2, [s.src_index for s in audio])
 
     def test_reuses_existing_stereo_instead_of_rebuilding(self):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng"),
@@ -298,7 +328,8 @@ class TestAudio(Base):
     def test_an_adopted_second_stereo_track_is_named_too(self):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "aac", 2, "eng")])
-        stereo = next(s for s in self.kinds(p, "audio") if s.note == "existing stereo")
+        stereo = next(s for s in self.kinds(p, "audio") if s.note == "stereo")
+        self.assertEqual(stereo.src_index, 2)
         self.assertEqual(stereo.title, "Stereo")
 
     def test_wrong_disposition_triggers_a_fix(self):
@@ -311,8 +342,187 @@ class TestAudio(Base):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "aac", 2, "jpn")])
         audio = self.kinds(p, "audio")
-        self.assertEqual(audio[0].codec, "aac")
+        self.assertEqual(audio[0].codec, ENCODER)
         self.assertEqual(audio[0].src_index, 1)
+
+
+class TestStereoConversion(Base):
+    """A 2.0 track that is not AAC is transcoded, not kept beside a copy."""
+
+    def test_non_aac_stereo_is_reencoded_in_place(self):
+        p = self.plan([V(0, "hevc"), A(1, "ac3", 2, "eng", default=1)])
+        audio = self.kinds(p, "audio")
+        self.assertEqual(len(audio), 1)                  # not both
+        self.assertEqual(audio[0].codec, ENCODER)
+        self.assertEqual(audio[0].src_index, 1)
+        self.assertEqual(audio[0].extra, ["-b:{i}", "192k"])
+        self.assertEqual(audio[0].disposition, "default")
+        self.assertEqual(audio[0].title, "Stereo")
+        self.assertIn("re-encode ac3 stereo to aac 192k", p.reasons)
+
+    def test_it_is_preferred_over_folding_the_surround_mix_down(self):
+        """Re-encoding a 2.0 mix beats a second lossy generation off the 5.1."""
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
+                       A(2, "ac3", 2, "eng")])
+        audio = self.kinds(p, "audio")
+        self.assertEqual(audio[0].src_index, 2)
+        self.assertEqual(audio[0].codec, ENCODER)
+        self.assertFalse(any("downmix" in r for r in p.reasons), p.reasons)
+
+    def test_an_existing_aac_stereo_track_wins_over_another_stereo_codec(self):
+        p = self.plan([V(0, "hevc"), A(1, "ac3", 2, "eng"),
+                       A(2, "aac", 2, "eng", title="Stereo", default=1)])
+        audio = self.kinds(p, "audio")
+        chosen = next(s for s in audio if s.disposition == "default")
+        self.assertEqual(chosen.src_index, 2)
+        self.assertEqual(chosen.codec, "copy")
+        # The other one is still brought to AAC, just not made the default.
+        other = next(s for s in audio if s.src_index == 1)
+        self.assertEqual(other.codec, ENCODER)
+
+    def test_a_foreign_stereo_track_is_converted_but_not_promoted(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
+                       A(2, "ac3", 2, "fre")])
+        french = next(s for s in self.kinds(p, "audio") if s.src_index == 2)
+        self.assertEqual(french.codec, ENCODER)
+        self.assertEqual(french.disposition, "0")
+        self.assertIsNone(french.title)
+
+
+class TestDownmixSelection(Base):
+    """Which surround track gets folded down, and which never may."""
+
+    def test_the_widest_track_wins(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
+                       A(2, "dts", 8, "eng")])
+        self.assertEqual(self.kinds(p, "audio")[0].src_index, 2)
+
+    def test_bitrate_breaks_a_channel_count_tie(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", bitrate=640_000),
+                       A(2, "ac3", 6, "eng", bitrate=1_500_000)])
+        self.assertEqual(self.kinds(p, "audio")[0].src_index, 2)
+
+    def test_the_lowest_index_breaks_a_bitrate_tie(self):
+        p = self.plan([V(0, "hevc"), A(3, "eac3", 6, "eng", bitrate=640_000),
+                       A(1, "eac3", 6, "eng", bitrate=640_000)])
+        self.assertEqual(self.kinds(p, "audio")[0].src_index, 1)
+
+    def test_an_untagged_bitrate_does_not_sink_a_wider_track(self):
+        p = self.plan([V(0, "hevc"), A(1, "ac3", 6, "eng", bitrate=640_000),
+                       A(2, "truehd", 8, "eng")])
+        self.assertEqual(self.kinds(p, "audio")[0].src_index, 2)
+
+    def test_a_commentary_title_is_excluded(self):
+        for title in ("Director's Commentary", "Isolated Score",
+                      "Cast and crew", "Audio Description", "SIGN LANGUAGE"):
+            with self.subTest(title=title):
+                p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", title=title),
+                               A(2, "eac3", 6, "eng")])
+                self.assertEqual(self.kinds(p, "audio")[0].src_index, 2)
+
+    def test_the_comment_disposition_is_excluded(self):
+        p = self.plan([V(0, "hevc"), A(1, "dts", 8, "eng", comment=1),
+                       A(2, "eac3", 6, "eng")])
+        self.assertEqual(self.kinds(p, "audio")[0].src_index, 2)
+
+    def test_the_visual_impaired_disposition_is_excluded(self):
+        p = self.plan([V(0, "hevc"), A(1, "dts", 8, "eng", visual_impaired=1),
+                       A(2, "eac3", 6, "eng")])
+        self.assertEqual(self.kinds(p, "audio")[0].src_index, 2)
+
+    def test_a_foreign_surround_track_is_not_a_candidate(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "fre", default=1)])
+        audio = self.kinds(p, "audio")
+        self.assertEqual(len(audio), 1)
+        self.assertEqual(audio[0].codec, "copy")
+        self.assertFalse(p.needs_work)
+
+    def test_an_odd_channel_count_is_not_a_candidate(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 7, "eng", default=1)])
+        self.assertEqual(self.kinds(p, "audio")[0].codec, "copy")
+
+    def test_nothing_left_after_exclusion_is_flagged_not_guessed(self):
+        """Guessing here ships a film defaulting to a director talking."""
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", title="Commentary",
+                                       default=1),
+                       A(2, "dts", 8, "eng", visual_impaired=1)])
+        audio = self.kinds(p, "audio")
+        self.assertTrue(all(s.codec == "copy" for s in audio))
+        self.assertIn("commentary or described audio", p.manual_review)
+        # A flag, never a reason: needs_work would re-queue it forever.
+        self.assertFalse(p.needs_work, p.reasons)
+
+    def test_a_file_with_no_surround_track_is_not_flagged(self):
+        p = self.plan([V(0, "hevc"), A(1, "aac", 1, "eng", default=1)])
+        self.assertEqual(p.manual_review, "")
+
+
+class TestDownmixMethod(Base):
+    """How the fold-down is done: the mix engineer's coefficients if there are
+    any, and a normalised matrix if there are not."""
+
+    def stereo(self, streams):
+        return self.kinds(self.plan(streams), "audio")[0]
+
+    def test_a_codec_with_downmix_metadata_asks_the_decoder(self):
+        for codec in ("ac3", "eac3", "dts", "truehd"):
+            with self.subTest(codec=codec):
+                s = self.stereo([V(0, "hevc"), A(1, codec, 6, "eng", default=1)])
+                self.assertEqual(s.input_extra, ["-downmix:{s}", "stereo"])
+                self.assertNotIn("-filter:{i}", s.extra)
+
+    def test_anything_else_uses_the_normalised_matrix(self):
+        s = self.stereo([V(0, "hevc"), A(1, "flac", 6, "eng", default=1)])
+        self.assertEqual(s.input_extra, [])
+        self.assertIn("-filter:{i}", s.extra)
+        self.assertIn("aresample=rematrix_maxval=1.0", s.extra)
+
+    def test_the_downmix_is_constant_bitrate_and_tagged(self):
+        s = self.stereo([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1)])
+        self.assertIn("-b:{i}", s.extra)
+        self.assertNotIn("-q:{i}", s.extra)
+        self.assertEqual(s.extra[s.extra.index("-b:{i}") + 1], "160k")
+        self.assertEqual(s.language, "eng")
+        self.assertEqual(s.title, "Stereo")
+        self.assertEqual(s.disposition, "default")
+        self.assertIn("-ac:{i}", s.extra)
+
+    def test_it_always_comes_off_the_source_track(self):
+        """Never off a stereo track an earlier step in the same run made."""
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1)])
+        downmix = self.kinds(p, "audio")[0]
+        self.assertEqual(downmix.src_index, 1)
+
+
+class TestKeepStereoOnly(Base):
+    def setUp(self):
+        super().setUp()
+        self.mode.audio.keep_stereo_only = True
+
+    def test_commentary_and_described_audio_survive(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
+                       A(2, "eac3", 6, "eng", title="Commentary"),
+                       A(3, "aac", 2, "eng", visual_impaired=1),
+                       A(4, "ac3", 6, "fre")])
+        kept = {s.src_index for s in self.kinds(p, "audio")}
+        self.assertEqual(kept, {1, 2, 3})     # 1 is the downmix source
+        self.assertEqual(self.kinds(p, "audio")[0].codec, ENCODER)
+        self.assertIn("audio ac3 6ch fre", p.dropped)
+
+    def test_nothing_is_dropped_when_no_stereo_could_be_made(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", title="Commentary",
+                                       default=1),
+                       A(2, "ac3", 6, "fre")])
+        self.assertEqual(len(self.kinds(p, "audio")), 2)
+        self.assertEqual(p.dropped, [])
+
+    def test_an_existing_stereo_track_is_the_one_kept(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
+                       A(2, "aac", 2, "eng", title="Stereo")])
+        audio = self.kinds(p, "audio")
+        self.assertEqual([s.src_index for s in audio], [2])
+        self.assertEqual(audio[0].codec, "copy")
+        self.assertEqual(audio[0].disposition, "default")
 
 
 class TestSubtitleContainers(Base):
@@ -410,7 +620,6 @@ class TestIdempotency(Base):
             self.assertFalse(self.plan(streams).needs_work)
 
     def test_idempotent_when_keeping_all_audio(self):
-        self.mode.audio.keep_best_only = False
         after = [
             V(0, "hevc", 1080),
             A(1, "aac", 2, "eng", title="Stereo", default=1),
@@ -426,6 +635,73 @@ class TestIdempotency(Base):
         after = [V(0, "hevc", 1080), A(1, "eac3", 6, "eng", default=1), S(2, "eng")]
         for _ in range(3):
             self.assertFalse(self.plan(after).needs_work)
+
+    def test_idempotent_when_only_the_stereo_track_is_kept(self):
+        self.mode.audio.keep_stereo_only = True
+        after = [V(0, "hevc", 1080),
+                 A(1, "aac", 2, "eng", title="Stereo", default=1),
+                 A(2, "eac3", 6, "eng", title="Commentary", default=0),
+                 S(3, "eng")]
+        for _ in range(3):
+            p = self.plan(after)
+            self.assertFalse(p.needs_work, f"unexpected work: {p.reasons}")
+
+    def test_a_reencoded_stereo_track_is_not_reencoded_again(self):
+        before = self.plan([V(0, "hevc"), A(1, "ac3", 2, "eng", default=1)])
+        self.assertTrue(before.needs_work)
+        after = self.plan([V(0, "hevc"),
+                           A(1, "aac", 2, "eng", title="Stereo", default=1)])
+        self.assertFalse(after.needs_work, f"unexpected work: {after.reasons}")
+
+    def test_a_file_flagged_for_review_is_never_re_queued(self):
+        streams = [V(0, "hevc", 1080),
+                   A(1, "eac3", 6, "eng", title="Commentary", default=1),
+                   S(2, "eng")]
+        for _ in range(3):
+            p = self.plan(streams)
+            self.assertTrue(p.manual_review)
+            self.assertFalse(p.needs_work, f"unexpected work: {p.reasons}")
+
+    def test_sd_output_needs_no_further_work(self):
+        p = self.plan([V(0, "hevc", 480),
+                       A(1, "aac", 2, "eng", title="Stereo", default=1),
+                       A(2, "eac3", 6, "eng", default=0)])
+        self.assertFalse(p.needs_work, f"unexpected work: {p.reasons}")
+
+
+class TestVideoCopyFallback(Base):
+    """What is left of a run whose x265 pass came back bigger than the source."""
+
+    def plan_1080p(self):
+        return self.plan([V(0, "h264", 1080), A(1, "eac3", 6, "eng", default=1),
+                          S(2, "eng"), S(3, "jpn")])
+
+    def test_the_video_stream_reverts_to_a_copy(self):
+        fallback = self.plan_1080p().without_video_encode()
+        video = self.kinds(fallback, "video")
+        self.assertEqual([s.codec for s in video], ["copy"])
+        self.assertEqual(video[0].extra, [])
+        self.assertFalse(fallback.encodes_video)
+
+    def test_the_audio_and_subtitle_work_is_kept(self):
+        original = self.plan_1080p()
+        fallback = original.without_video_encode()
+        self.assertEqual([s.src_index for s in fallback.streams],
+                         [s.src_index for s in original.streams])
+        self.assertEqual([(s.kind, s.codec) for s in fallback.streams][1:],
+                         [(s.kind, s.codec) for s in original.streams][1:])
+        self.assertIn("drop unwanted subtitle", fallback.reasons)
+        self.assertTrue(any("downmix" in r for r in fallback.reasons))
+
+    def test_the_encode_reason_goes_with_the_encode(self):
+        fallback = self.plan_1080p().without_video_encode()
+        self.assertFalse(any(r.startswith("encode video") for r in fallback.reasons))
+
+    def test_the_original_plan_is_untouched(self):
+        original = self.plan_1080p()
+        original.without_video_encode()
+        self.assertTrue(original.encodes_video)
+        self.assertIn("encode video h264 -> x265 crf 22", original.reasons)
 
 
 class TestArgs(Base):
@@ -446,6 +722,7 @@ class TestArgs(Base):
         self.assertIn(f"-x265-params:0 pools={self.cfg.workers.pools}", joined)
 
     def test_dropped_streams_are_never_mapped(self):
+        self.mode.audio.keep_stereo_only = True
         p = self.plan([V(0, "h264"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre"), S(3, "eng"), S(4, "jpn")])
         args = build_args(p, "/tmp/out.mkv")
@@ -457,10 +734,25 @@ class TestArgs(Base):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1)])
         joined = " ".join(build_args(p, "/tmp/out.mkv"))
         self.assertIn("-c:0 copy", joined)
-        self.assertIn("-c:1 aac", joined)
+        self.assertIn(f"-c:1 {encoder_for(ENCODER)}", joined)
         self.assertIn("-ac:1 2", joined)
         self.assertIn("-b:1 160k", joined)
         self.assertIn("title=Stereo", joined)
+        self.assertIn("language=eng", joined)
+
+    def test_a_decoder_option_lands_before_the_input(self):
+        """-downmix configures the decoder, so ffmpeg only takes it ahead of -i."""
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1)])
+        args = build_args(p, "/tmp/out.mkv")
+        self.assertIn("-downmix:1", args)
+        self.assertLess(args.index("-downmix:1"), args.index("-i"))
+        self.assertEqual(args[args.index("-downmix:1") + 1], "stereo")
+
+    def test_the_matrix_filter_is_an_output_option(self):
+        p = self.plan([V(0, "hevc"), A(1, "flac", 6, "eng", default=1)])
+        args = build_args(p, "/tmp/out.mkv")
+        self.assertIn("-filter:1", args)
+        self.assertGreater(args.index("-filter:1"), args.index("-i"))
 
     def test_video_is_always_the_first_output_stream(self):
         p = self.plan([V(0, "h264", 1080), A(1, "eac3", 6, "eng", default=1),

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app import config as cfgmod              # noqa: E402
+from app import ffmpeg                        # noqa: E402
 from app.config import Config, ConfigError    # noqa: E402
 from app.plan import plan_file                # noqa: E402
 
@@ -100,9 +101,18 @@ class TestCleanup(Base):
     def test_audio_and_subtitles_are_still_cleaned(self):
         p = self.plan(self.STREAMS, mode="cleanup")
         self.assertTrue(p.needs_work)
-        self.assertIn("drop extra audio", p.reasons)
-        self.assertIn("add aac stereo downmix", p.reasons)
+        self.assertIn("downmix eac3 6ch to aac stereo", p.reasons)
         self.assertIn("drop unwanted subtitle", p.reasons)
+
+    def test_a_cleanup_run_is_never_rejected_for_growing(self):
+        """It only ever adds a stereo track, so a ceiling would reject it all."""
+        out = cfgmod.resolve(self.cfg, self.lib, "cleanup").output
+        p = self.plan(self.STREAMS, mode="cleanup")
+        self.assertFalse(p.encodes_video)
+        self.assertIsNone(ffmpeg.size_verdict(1_000_000, 1_400_000, out,
+                                              video_encoded=False))
+        self.assertIsNotNone(ffmpeg.size_verdict(1_000_000, 1_400_000, out,
+                                                 video_encoded=True))
 
     def test_the_same_file_under_standard_does_encode(self):
         p = self.plan(self.STREAMS, mode="standard")

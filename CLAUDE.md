@@ -49,6 +49,16 @@ port but never starts worker threads, so it touches nothing.
   duration, discard unless the size lands inside the library's
   `min_size_ratio`..`max_size_ratio` window (`ffmpeg.size_verdict`, which also writes
   the rejection note), stage next to the original, `os.replace` into place.
+- **The size *ceiling* only judges a run that re-encoded the video**
+  (`size_verdict(..., video_encoded)`, set from `FilePlan.encodes_video`). It is really
+  asking whether the x265 pass paid off; a run that copied the video has no way to
+  shrink the file and every reason to grow it, so applying it would reject every
+  cleanup pass. The floor applies either way — an output at a tenth of the source
+  means something was lost however it got there. A ceiling rejection is not the end of
+  the run: `engine._rebuild_without_encode` re-runs it from `plan.without_video_encode()`
+  so the audio and subtitle work still lands, and the result is stored as `skip`, not
+  `done`/`pending` — the rejected encode would be attempted and rejected again on every
+  scan otherwise.
 
 ## Architecture
 
@@ -57,7 +67,16 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
 
 - `probe.py` — thin ffprobe wrapper plus stream accessors (`lang_of`, `codec_of`, …). The
   `Probe` dataclass is just `path + streams + fmt`, which is why tests can fabricate one.
-- `plan.py` — **pure**: `plan_file(probe, lib, cfg) -> FilePlan`. A stream copy is not
+- `plan.py` — **pure**: `plan_file(probe, lib, cfg) -> FilePlan`. Audio is the part with
+  the sharp edge: the stereo track is chosen by an explicit rule, not a score. A 2.0
+  track already in the file wins (re-encoded to AAC if it is not already, never kept
+  beside its own copy); failing that, the widest `downmix_channels` track in a
+  `preferred_languages` language is folded down, ties broken by bitrate then stream
+  index. Anything with the `comment` or `visual_impaired` disposition, or a title
+  matching `commentary_pattern`, is excluded — and if exclusion empties the candidate
+  list, **nothing is downmixed**: `FilePlan.manual_review` is set instead. That is
+  deliberately *not* a `reason`, because a file nobody ever looks at would otherwise be
+  re-planned and re-queued forever. A stream copy is not
   always free: `CONTAINER_SUBTITLES` says what the target container can mux, and a text
   track it cannot (`mov_text` into mkv) is converted to `srt` rather than copied — the
   muxer would otherwise refuse the header and fail the entire encode. Applies even with
@@ -68,7 +87,12 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
 - `ffmpeg.py` — `build_args(plan, dest)` turns a plan into an invocation. Every output stream
   gets an explicit `-c:` — omitting one makes ffmpeg silently fall back to the container
   default encoder (H.264 for mkv). `"{i}"` in `StreamPlan.extra` is substituted with the
-  *output* stream index at build time.
+  *output* stream index at build time; `"{s}"` in `StreamPlan.input_extra` with the
+  *source* index, and those args are emitted **before `-i`** because they configure the
+  decoder (`-downmix stereo`, which is what `-request_channel_layout stereo` became in
+  ffmpeg 7). A plan names `AAC_AUTO` rather than a real encoder: which AAC encoder exists
+  is a property of the binary, not of the library's settings, and planning has to stay
+  pure, so `encoder_for`/`aac_encoder` resolve it here instead.
 - `config.py` — the config file is **generated, not patched**. Dataclasses hold defaults;
   `META` / `LIB_META` hold per-field description, min/max, choices, `restart`, `readonly`.
   That one table drives the comments in the emitted TOML, the settings panel's schema, and

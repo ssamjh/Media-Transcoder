@@ -82,12 +82,24 @@ def title_of(stream: dict[str, Any]) -> str:
     return str((stream.get("tags") or {}).get("title") or "")
 
 
+def disposition(stream: dict[str, Any], flag: str) -> bool:
+    return int((stream.get("disposition") or {}).get(flag) or 0) == 1
+
+
 def is_default(stream: dict[str, Any]) -> bool:
-    return int((stream.get("disposition") or {}).get("default") or 0) == 1
+    return disposition(stream, "default")
 
 
 def is_attached_pic(stream: dict[str, Any]) -> bool:
-    return int((stream.get("disposition") or {}).get("attached_pic") or 0) == 1
+    return disposition(stream, "attached_pic")
+
+
+def is_comment(stream: dict[str, Any]) -> bool:
+    return disposition(stream, "comment")
+
+
+def is_visual_impaired(stream: dict[str, Any]) -> bool:
+    return disposition(stream, "visual_impaired")
 
 
 def codec_of(stream: dict[str, Any]) -> str:
@@ -99,3 +111,19 @@ def channels_of(stream: dict[str, Any]) -> int:
         return int(stream.get("channels") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def bitrate_of(stream: dict[str, Any]) -> int:
+    """Bits per second, or 0 when the container does not record it.
+
+    Matroska usually does not, which is why bitrate is only ever a tie-break:
+    a missing one must not push a track below a genuinely worse one.
+    """
+    for key in ("bit_rate", "BPS", "BPS-eng"):
+        value = stream.get(key) or (stream.get("tags") or {}).get(key)
+        try:
+            if value:
+                return int(float(value))
+        except (TypeError, ValueError):
+            continue
+    return 0
