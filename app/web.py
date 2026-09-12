@@ -216,13 +216,19 @@ class Handler(BaseHTTPRequestHandler):
         active = []
         for j in eng.active:
             elapsed = now - j.started
-            eta = (elapsed / j.percent * (100 - j.percent)) if j.percent > 1 else 0
+            # Progress belongs to the current stage, so the ETA has to be
+            # measured from when that stage started - a copy that is 40% done
+            # says nothing about the hour spent encoding before it.
+            in_stage = now - (j.stage_started or j.started)
+            eta = (in_stage / j.percent * (100 - j.percent)) if j.percent > 1 else 0
             active.append({
                 "path": j.path,
                 "name": Path(j.path).name,
+                "stage": j.stage,
                 "percent": round(j.percent, 2),
                 "speed": round(j.speed, 2),
                 "elapsed": elapsed,
+                "stage_elapsed": in_stage,
                 "eta": eta,
                 "in_size": j.in_size,
                 "library": j.library,

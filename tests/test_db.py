@@ -28,7 +28,7 @@ class ForgettingTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.cfg = Config()
         self.cfg.state_db = str(Path(self.tmp.name) / "state.db")
-        add_library(self.cfg, "TV", [p("TV")])
+        add_library(self.cfg, "TV", [p("TV")]).enabled = True
         self.db = Db(self.cfg.state_db)
         self.addCleanup(self.db.close)
         self.engine = Engine(self.cfg, self.db)
@@ -54,7 +54,7 @@ class ForgettingTest(unittest.TestCase):
         self.assertEqual(len(self.tracked()), 2)
 
     def test_another_librarys_files_are_left_alone(self):
-        add_library(self.cfg, "Movies", [p("Movies")])
+        add_library(self.cfg, "Movies", [p("Movies")]).enabled = True
         self.db.upsert(p("Movies", "c.mkv"), size=100, mtime=1.0,
                        status="done", library="movies")
         self.assertEqual(self.db.forget_unowned(self.engine._owned), 0)

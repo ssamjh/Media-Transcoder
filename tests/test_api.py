@@ -34,8 +34,8 @@ class ApiTest(unittest.TestCase):
 
         cfg = Config()
         cfg.state_db = str(root / "state.db")
-        cfgmod.add_library(cfg, "TV", [str(root / "media" / "TV")])
-        cfgmod.add_library(cfg, "Movies", [str(root / "media" / "Movies")])
+        for name in ("TV", "Movies"):
+            cfgmod.add_library(cfg, name, [str(root / "media" / name)]).enabled = True
         cfg.output.temp_dir = str(root / "temp")
         cfg.schedule.enabled = False
         cfg.web.host = "127.0.0.1"
@@ -484,7 +484,7 @@ class ApiKeyTest(unittest.TestCase):
         root = Path(cls.tmp.name)
         cfg = Config()
         cfg.state_db = str(root / "state.db")
-        cfgmod.add_library(cfg, "Media", [str(root / "media")])
+        cfgmod.add_library(cfg, "Media", [str(root / "media")]).enabled = True
         cfg.output.temp_dir = str(root / "temp")
         cfg.schedule.enabled = False
         cfg.web.host, cfg.web.port = "127.0.0.1", 0

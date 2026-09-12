@@ -26,7 +26,7 @@ Each is independently switchable per library.
 | Stage | When enabled | When disabled |
 | --- | --- | --- |
 | **Video** | 720p → x265 CRF 23, 1080p → CRF 22. Already-HEVC is copied, never re-encoded. SD (≤576p) cleaned but not re-encoded. Above 1200p left alone entirely. | Every video stream copied untouched, and the height ceiling no longer applies — a 4K file still gets its audio and subtitles cleaned. |
-| **Audio** | Keeps the best track — preferred language, not commentary, sane channel layout, widely supported codec — plus an AAC 2.0 downmix as default. An existing stereo track is re-used, not rebuilt. `keep_best_only` and `add_stereo_downmix` are separate switches. | Every audio track copied untouched, dispositions left alone. |
+| **Audio** | Keeps the best track — preferred language, not commentary, sane channel layout, widely supported codec — plus an AAC 2.0 downmix as default, titled `Stereo` (`audio.stereo_title`) whether it was encoded or adopted. An existing stereo track is re-used, not rebuilt. `keep_best_only` and `add_stereo_downmix` are separate switches. | Every audio track copied untouched, dispositions left alone. |
 | **Subtitles** | Keeps configured languages only. If none match and there is exactly one *unlabelled* track, that one is kept. | Every subtitle track copied untouched. |
 | **Output** | Container normalised to MKV (or `keep` to leave the extension alone), cover art dropped, originals replaced once verified. | — |
 | **Notifications** | Once the verified file is back in place, calls the URLs you list — Jellyfin, Plex, anything with an HTTP endpoint. Queued and delivered in the background. | Nothing is called. |
@@ -64,7 +64,8 @@ The panel is on <http://localhost:8080>. On first start it writes a fully
 commented `config/config.toml` and generates an API key for
 [Sonarr and Radarr](#sonarr-and-radarr). No libraries are configured, so
 nothing is scanned until you add one — *Add library* in the Libraries tab, or
-`transcoder libraries --add`.
+`transcoder libraries --add`. A new library arrives switched off; tick it on
+when its profile looks right.
 
 > **The panel itself has no authentication.** The API key guards `/api/`, but
 > the panel is served with that key embedded so the UI can use it — anyone who
@@ -72,10 +73,14 @@ nothing is scanned until you add one — *Add library* in the Libraries tab, or
 > config, so keep it on a trusted network — behind a reverse proxy with auth,
 > or bound to localhost. Do not expose it to the internet.
 
-**Look before you leap.** Turn off periodic scans, define your libraries, run
-a scan, and read the Files tab before letting it process anything. Setting a
-library's `output.replace_original` to false makes it encode and then discard,
-which is a good way to check settings against real files.
+**Nothing is encoded until you ask for it.** A new library is created switched
+off, a scan only plans and reports, and what it finds waits in `pending` until
+you press *Queue pending* — so the intended first run is: add the library,
+configure its profile, tick it on, scan, read the Files tab, then queue. Turn
+on `schedule.process_after_scan` once you trust it and every scan queues its
+own work. Setting a library's `output.replace_original` to false makes it
+encode and then discard, which is a good way to check settings against real
+files.
 
 ## The panel
 
@@ -87,8 +92,15 @@ periodic scans.
 **Libraries** — one card per library showing its paths, which stages are on,
 and its own counts and reclaimed bytes. *Configure* expands the full profile
 inline; *Scan* scans just that library; the checkbox includes or excludes it
-from scans. *Add library* takes a name and paths — overlapping paths are
-rejected, since a file under two libraries would have an ambiguous profile.
+from scans, and starts unticked on a new library. *Add library* takes a name
+and paths — overlapping paths are rejected, since a file under two libraries
+would have an ambiguous profile.
+
+The dashboard shows the stage each job is in: *encoding* with its speed as a
+multiple of realtime, then *copying* with MB/s as the verified file is put back
+on the library. Only one file is copied back at a time however many workers are
+running — the library is usually one network link, and parallel copies only
+halve each other — so a job waiting its turn says *waiting to copy*.
 
 **Files** — every tracked file with search, and filters for library and
 status. Click a row for the detail drawer: the full plan (every output stream,

@@ -11,10 +11,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import threading
+import time
+
 from app import ffmpeg
-from app.config import Config
+from app.config import Config, add_library
 from app.db import Db
-from app.engine import Engine
+from app.engine import ActiveJob, Engine
 
 
 class SweepTest(unittest.TestCase):
@@ -72,3 +75,103 @@ class SweepTest(unittest.TestCase):
         finally:
             engine.stop()
             engine.join(timeout=5)
+
+
+class CopyBackTest(unittest.TestCase):
+    """Putting the finished encode onto the library."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.cfg = Config()
+        self.cfg.state_db = ":memory:"
+        self.cfg.output.temp_dir = str(self.root / "temp")
+        self.lib = add_library(self.cfg, "TV", [str(self.root / "media")])
+        self.lib.enabled = True
+        self.db = Db(self.cfg.state_db)
+        self.addCleanup(self.db.close)
+        self.engine = Engine(self.cfg, self.db)
+
+    def test_copy_with_progress_copies_the_bytes_and_reports(self):
+        src = self.root / "in.bin"
+        dst = self.root / "out.bin"
+        payload = bytes(range(256)) * (ffmpeg.COPY_CHUNK // 128)   # 2 chunks
+        src.write_bytes(payload)
+
+        seen: list[float] = []
+        ffmpeg._copy_with_progress(src, dst, lambda pct, mbps: seen.append(pct))
+
+        self.assertEqual(dst.read_bytes(), payload)
+        self.assertEqual(seen, sorted(seen))
+        self.assertAlmostEqual(seen[-1], 100.0, places=6)
+        self.assertGreater(len(seen), 1)          # actually chunked
+        self.assertEqual(int(src.stat().st_mtime), int(dst.stat().st_mtime))
+
+    def test_only_one_file_is_copied_back_at_a_time(self):
+        """A network share is one link; parallel copies just halve each other."""
+        live = 0
+        peak = 0
+        guard = threading.Lock()
+
+        def fake_replace(src, result, cfg, lib, on_progress=None):
+            nonlocal live, peak
+            with guard:
+                live += 1
+                peak = max(peak, live)
+            if on_progress:
+                on_progress(50.0, 12.5)
+            time.sleep(0.05)
+            with guard:
+                live -= 1
+            return True
+
+        self.addCleanup(setattr, ffmpeg, "replace_original",
+                        ffmpeg.replace_original)
+        ffmpeg.replace_original = fake_replace
+
+        jobs = [ActiveJob(path=f"/media/f{i}.mkv", started=time.time())
+                for i in range(4)]
+        threads = [threading.Thread(
+            target=self.engine._copy_back,
+            args=(j, Path(j.path), None, self.lib)) for j in jobs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        self.assertEqual(peak, 1)
+        for j in jobs:
+            self.assertEqual(j.stage, "copying")
+            self.assertEqual(j.percent, 50.0)
+
+    def test_a_waiting_job_says_so(self):
+        held = threading.Event()
+        released = threading.Event()
+
+        def fake_replace(src, result, cfg, lib, on_progress=None):
+            held.set()
+            released.wait(timeout=5)
+            return True
+
+        self.addCleanup(setattr, ffmpeg, "replace_original",
+                        ffmpeg.replace_original)
+        ffmpeg.replace_original = fake_replace
+
+        first = ActiveJob(path="/media/a.mkv", started=time.time())
+        second = ActiveJob(path="/media/b.mkv", started=time.time())
+        t1 = threading.Thread(target=self.engine._copy_back,
+                              args=(first, Path(first.path), None, self.lib))
+        t1.start()
+        self.assertTrue(held.wait(timeout=5))
+
+        t2 = threading.Thread(target=self.engine._copy_back,
+                              args=(second, Path(second.path), None, self.lib))
+        t2.start()
+        time.sleep(0.05)
+        self.assertEqual(first.stage, "copying")
+        self.assertEqual(second.stage, "waiting to copy")
+
+        released.set()
+        t1.join(timeout=5)
+        t2.join(timeout=5)

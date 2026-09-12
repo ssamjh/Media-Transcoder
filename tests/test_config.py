@@ -19,16 +19,21 @@ from app.config import Config, ConfigError          # noqa: E402
 
 
 def one_library(path: str = "/media/A", name: str = "Media") -> Config:
-    """A config with a single library: Config() itself now has none."""
+    """A config with a single, enabled library.
+
+    Config() itself has none, and add_library() creates them switched off,
+    so both steps are explicit here - as they are in the panel.
+    """
     c = Config()
-    cfgmod.add_library(c, name, [path])
+    cfgmod.add_library(c, name, [path]).enabled = True
     return c
 
 
 def three_libraries() -> Config:
     c = one_library("/media/TV", "TV")
-    cfgmod.add_library(c, "Movies", ["/media/Movies"])
-    cfgmod.add_library(c, "Home Video", ["/media/Home", "/media/Camera"])
+    for name, paths in [("Movies", ["/media/Movies"]),
+                        ("Home Video", ["/media/Home", "/media/Camera"])]:
+        cfgmod.add_library(c, name, paths).enabled = True
     return c
 
 
@@ -128,6 +133,14 @@ class TestLibraries(unittest.TestCase):
         b = cfgmod.add_library(c, "TV Shows", ["/media/TV2"])
         self.assertEqual(a.id, "tv-shows")
         self.assertEqual(b.id, "tv-shows-2")
+
+    def test_a_new_library_starts_switched_off(self):
+        """Adding paths must never be the thing that starts work."""
+        c = one_library()
+        lib = cfgmod.add_library(c, "New", ["/media/New"])
+        self.assertFalse(lib.enabled)
+        self.assertNotIn(lib, c.active_libraries)
+        self.assertIsNone(c.library_for("/media/New/a.mkv"))
 
     def test_new_library_starts_from_defaults(self):
         c = one_library()

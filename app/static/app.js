@@ -226,9 +226,22 @@ async function openFile(path) {
 
 /* ---------- settings fields (shared by Settings and Libraries) ---------- */
 
+// An input's value is always a string. The schema's value is not, and the two
+// are compared by JSON to decide whether a field is dirty - so a number read
+// back as "22" differs from 22 on a form nobody has touched, and every numeric
+// field reports itself unsaved forever.
+function asNumber(raw) {
+  const t = String(raw).trim();
+  // Anything unparseable goes to the server as typed, which rejects it with a
+  // message: Number("") is 0, and silently saving 0 for a box someone cleared
+  // would be worse than an error.
+  return t !== "" && Number.isFinite(Number(t)) ? Number(t) : raw;
+}
+
 function readControl(node, type) {
   if (!node) return null;
   if (type === "bool") return node.checked;
+  if (type === "int" || type === "float") return asNumber(node.value);
   if (type === "list") {
     return node.value.split("\n").map((s) => s.trim())
       .filter((s, i, a) => s !== "" || i < a.length - 1);
@@ -239,7 +252,7 @@ function readControl(node, type) {
       const t = line.trim();
       if (!t) continue;
       const [k, v] = t.split("=").map((x) => (x || "").trim());
-      if (k) out[k] = v;
+      if (k) out[k] = asNumber(v);
     }
     return out;
   }
@@ -470,8 +483,9 @@ el("l-add").addEventListener("click", () => {
       <span class="hint">One per line, as seen inside the container. They must
         not overlap another library.</span></div>
     <div><button class="primary" id="nl-go">Create</button></div>
-    <p class="muted">The new library starts from the default profile.
-      Configure it afterwards.</p>
+    <p class="muted">The new library starts from the default profile, and
+      starts switched off: nothing is scanned or encoded until you configure
+      it and tick it on.</p>
   </div>`);
   el("nl-go").addEventListener("click", async () => {
     const d = await act("/api/libraries/add", {
@@ -545,18 +559,30 @@ async function tick() {
   ).join("");
 
   el("active-count").textContent = d.active.length || "";
-  el("active").innerHTML = d.active.length ? d.active.map((j) => `
+  el("active").innerHTML = d.active.length ? d.active.map((j) => {
+    const stage = j.stage || "encoding";
+    const copying = stage === "copying";
+    const waiting = stage === "waiting to copy";
+    // Copy speed is MB/s; encode speed is a multiple of realtime.
+    const rate = copying ? `${j.speed.toFixed(1)} MB/s` : `${j.speed.toFixed(2)}x`;
+    const progress = waiting
+      ? "waiting for another copy to finish"
+      : `${j.percent.toFixed(1)}% · ${rate}${
+          j.eta ? " · " + hms(j.eta) + " left" : ""}`;
+    return `
     <div class="job">
       <div class="job-head">
         <div class="job-name">${esc(j.name)}</div>
+        <span class="tag${copying ? " info" : ""}">${esc(stage)}</span>
         <button class="small danger" data-cancel="${esc(j.path)}">Cancel</button>
       </div>
-      <div class="meta">${j.percent.toFixed(1)}% · ${j.speed.toFixed(2)}x ·
-        ${hms(j.elapsed)} elapsed${j.eta ? " · " + hms(j.eta) + " left" : ""}
+      <div class="meta">${progress} · ${hms(j.elapsed)} elapsed
         · ${bytes(j.in_size)}${j.library ? " · " + esc(j.library) : ""}</div>
       <div class="meta">${esc(j.reasons.join("; "))}</div>
-      <div class="bar-track"><i style="width:${j.percent}%"></i></div>
-    </div>`).join("") : '<div class="empty">Idle</div>';
+      <div class="bar-track${waiting ? " idle" : ""}"><i style="width:${
+        waiting ? 100 : j.percent}%"></i></div>
+    </div>`;
+  }).join("") : '<div class="empty">Idle</div>';
 
   el("active").querySelectorAll("[data-cancel]").forEach((b) =>
     b.addEventListener("click", () => act("/api/cancel", { path: b.dataset.cancel })));

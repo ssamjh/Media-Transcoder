@@ -155,6 +155,8 @@ td.name { word-break: break-word; min-width: 220px; }
   display: block; height: 100%; background: var(--accent);
   transition: width .4s ease;
 }
+/* Queued behind another copy: full width, but visibly not progress. */
+.bar-track.idle > i { background: var(--line); opacity: .8; }
 
 .tag {
   display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 20px;

@@ -263,6 +263,19 @@ def _plan_audio(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
             if existing:
                 break
 
+    def stereo_name(s: dict[str, Any]) -> str | None:
+        """Name an adopted stereo track, so it is obvious in a player.
+
+        A downmix this tool encodes is titled on the way out; one it merely
+        adopts keeps whatever name it arrived with, which is often none at
+        all. Returns None when the title already says it - retitling a file
+        that already says "Stereo" would make every scan find work forever.
+        """
+        if a.stereo_title.lower() in title_of(s).lower():
+            return None
+        plan.reasons.append("name the stereo track")
+        return a.stereo_title
+
     def want(s: dict[str, Any], default: bool) -> str:
         if is_default(s) is not default:
             plan.reasons.append("fix audio disposition")
@@ -284,6 +297,7 @@ def _plan_audio(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
             plan.streams.append(StreamPlan(
                 s["index"], "audio", "copy",
                 disposition=want(s, default) if a.add_stereo_downmix else None,
+                title=stereo_name(s) if default else None,
                 note="kept",
             ))
         return
@@ -305,7 +319,8 @@ def _plan_audio(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
     if existing is not None and existing is keep:
         plan.streams.append(StreamPlan(
             keep["index"], "audio", "copy",
-            disposition=want(keep, True), note="already AAC stereo",
+            disposition=want(keep, True), title=stereo_name(keep),
+            note="already AAC stereo",
         ))
         return
 
@@ -313,7 +328,8 @@ def _plan_audio(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
         # Stereo downmix first so players that grab track 1 get the safe one.
         plan.streams.append(StreamPlan(
             existing["index"], "audio", "copy",
-            disposition=want(existing, True), note="existing stereo",
+            disposition=want(existing, True), title=stereo_name(existing),
+            note="existing stereo",
         ))
         plan.streams.append(StreamPlan(
             keep["index"], "audio", "copy",

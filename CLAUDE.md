@@ -69,7 +69,10 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
   validation of updates. Adding a setting means adding the dataclass field *and* its META
   entry. `dump_toml` → `save` rewrites the whole file, which is why the panel can safely
   write on every change.
-- `engine.py` — the daemon. Worker threads pull paths off a `queue.Queue` (not a one-shot
+- `engine.py` — the daemon. **A scan never starts work by itself**: the scheduler
+  calls `enqueue_pending()` only when `schedule.process_after_scan` is on (default off),
+  and `add_library` creates libraries disabled, so no file is ever encoded that nobody
+  asked for. Worker threads pull paths off a `queue.Queue` (not a one-shot
   batch), so work can be queued and cancelled while live. `_process_one` **re-plans
   immediately before encoding** — a scan may be hours stale. Three failed attempts
   (`MAX_ATTEMPTS`) and a file is parked until an explicit retry.

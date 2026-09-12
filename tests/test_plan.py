@@ -58,6 +58,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.cfg = Config()
         self.lib = cfgmod.add_library(self.cfg, "Media", ["/media"])
+        self.lib.enabled = True
 
     def plan(self, streams, **kw):
         return plan_file(mk(streams, **kw), self.lib, self.cfg)
@@ -80,12 +81,13 @@ class TestVideo(Base):
         self.assertIn("23", p.streams[0].extra)
 
     def test_already_hevc_is_copied_not_reencoded(self):
-        p = self.plan([V(0, "hevc", 1080), A(1, "aac", 2, default=1)])
+        p = self.plan([V(0, "hevc", 1080), A(1, "aac", 2, title="Stereo", default=1)])
         self.assertEqual(p.streams[0].codec, "copy")
         self.assertFalse(p.needs_work)
 
     def test_hevc_with_undefaulted_audio_still_needs_a_disposition_fix(self):
-        p = self.plan([V(0, "hevc", 1080), A(1, "aac", 2, default=0)])
+        p = self.plan([V(0, "hevc", 1080),
+                       A(1, "aac", 2, title="Stereo", default=0)])
         self.assertEqual(p.streams[0].codec, "copy")
         self.assertTrue(p.needs_work)
         self.assertEqual(p.reasons, ["fix audio disposition"])
@@ -110,7 +112,7 @@ class TestVideo(Base):
     def test_cover_art_kept_when_the_library_says_so(self):
         self.lib.output.drop_cover_art = False
         p = self.plan([V(0, "hevc", 1080), V(1, "mjpeg", 500, attached=True),
-                       A(2, "aac", 2, default=1)])
+                       A(2, "aac", 2, title="Stereo", default=1)])
         self.assertEqual(len(self.kinds(p, "video")), 2)
         self.assertFalse(p.needs_work)
 
@@ -150,7 +152,7 @@ class TestStageSwitches(Base):
 
     def test_subtitles_disabled_copies_every_track(self):
         self.lib.subtitles.enabled = False
-        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", default=1),
+        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
                        S(2, "eng"), S(3, "fre"), S(4, "jpn")])
         self.assertEqual(len(self.kinds(p, "subtitle")), 3)
         self.assertFalse(p.needs_work)
@@ -194,7 +196,7 @@ class TestStageSwitches(Base):
 
     def test_container_keep_avoids_a_pointless_remux(self):
         self.lib.output.container = "keep"
-        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", default=1)],
+        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1)],
                       path="/media/Movies/Film.mp4")
         self.assertEqual(p.container, "mp4")
         self.assertFalse(p.needs_work)
@@ -260,9 +262,37 @@ class TestAudio(Base):
         self.assertFalse(p.needs_work)
 
     def test_single_aac_stereo_gets_no_duplicate(self):
-        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", default=1)])
+        p = self.plan([V(0, "hevc"),
+                       A(1, "aac", 2, "eng", title="Stereo", default=1)])
         self.assertEqual(len(self.kinds(p, "audio")), 1)
         self.assertFalse(p.needs_work)
+
+    def test_an_adopted_stereo_track_is_named(self):
+        """A downmix we encode is titled; one we adopt has to be too."""
+        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", default=1)])
+        track = self.kinds(p, "audio")[0]
+        self.assertEqual(track.codec, "copy")
+        self.assertEqual(track.title, "Stereo")
+        self.assertIn("name the stereo track", p.reasons)
+
+    def test_naming_the_stereo_track_is_idempotent(self):
+        """Or every scan would find the same work on the same file forever."""
+        p = self.plan([V(0, "hevc"),
+                       A(1, "aac", 2, "eng", title="Stereo", default=1)])
+        self.assertIsNone(self.kinds(p, "audio")[0].title)
+        self.assertNotIn("name the stereo track", p.reasons)
+
+    def test_a_title_that_already_says_stereo_is_left_alone(self):
+        p = self.plan([V(0, "hevc"),
+                       A(1, "aac", 2, "eng", title="AAC stereo 2.0", default=1)])
+        self.assertIsNone(self.kinds(p, "audio")[0].title)
+        self.assertNotIn("name the stereo track", p.reasons)
+
+    def test_an_adopted_second_stereo_track_is_named_too(self):
+        p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
+                       A(2, "aac", 2, "eng")])
+        stereo = next(s for s in self.kinds(p, "audio") if s.note == "existing stereo")
+        self.assertEqual(stereo.title, "Stereo")
 
     def test_wrong_disposition_triggers_a_fix(self):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
@@ -376,8 +406,8 @@ class TestArgs(Base):
 class TestLibraryRouting(unittest.TestCase):
     def test_each_library_uses_its_own_profile(self):
         cfg = Config()
-        cfgmod.add_library(cfg, "TV", ["/media/TV"])
-        cfgmod.add_library(cfg, "Movies", ["/media/Movies"])
+        cfgmod.add_library(cfg, "TV", ["/media/TV"]).enabled = True
+        cfgmod.add_library(cfg, "Movies", ["/media/Movies"]).enabled = True
         tv, movies = cfg.library("tv"), cfg.library("movies")
         movies.video.enabled = False
         movies.subtitles.enabled = False
@@ -402,8 +432,8 @@ class TestLibraryRouting(unittest.TestCase):
 
     def test_routing_picks_the_longest_matching_root(self):
         cfg = Config()
-        cfgmod.add_library(cfg, "TV", ["/media/TV"])
-        cfgmod.add_library(cfg, "Anime", ["/media/TV-Anime"])
+        cfgmod.add_library(cfg, "TV", ["/media/TV"]).enabled = True
+        cfgmod.add_library(cfg, "Anime", ["/media/TV-Anime"]).enabled = True
         self.assertEqual(cfg.library_for("/media/TV/Show/a.mkv").id, "tv")
         self.assertEqual(cfg.library_for("/media/TV-Anime/b.mkv").id, "anime")
         self.assertIsNone(cfg.library_for("/media/Other/c.mkv"))

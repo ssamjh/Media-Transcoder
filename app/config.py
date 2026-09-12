@@ -184,7 +184,11 @@ def default_modes() -> list[ModeCfg]:
 class ScheduleCfg:
     enabled: bool = True
     scan_interval_hours: float = 6.0
-    scan_on_start: bool = True
+    # Both default to off, so nothing is ever encoded that the user did not
+    # ask for: a scan plans and reports, and the work waits in `pending`
+    # until it is queued from the panel or this switch is turned on.
+    scan_on_start: bool = False
+    process_after_scan: bool = False
 
 
 @dataclass
@@ -281,7 +285,12 @@ META: dict[str, dict[str, Any]] = {
     "schedule.scan_interval_hours": {
         "desc": "Hours between automatic scans.", "min": 0.05, "max": 720},
     "schedule.scan_on_start": {
-        "desc": "Scan immediately on startup instead of waiting a full interval."},
+        "desc": "Scan immediately on startup instead of waiting a full "
+                "interval."},
+    "schedule.process_after_scan": {
+        "desc": "Queue everything a scan finds, instead of leaving it pending "
+                "for you to review and queue yourself. Off means no file is "
+                "ever encoded without being asked for."},
 
     "workers.count": {
         "desc": "How many files to encode at once, across all libraries.",
@@ -715,6 +724,10 @@ def add_library(cfg: Config, name: str, paths: list[str]) -> LibraryCfg:
     lib = LibraryCfg(
         id=slugify(name, {l.id for l in cfg.libraries}),
         name=name.strip(),
+        # Off until someone turns it on: a new library is a set of paths
+        # nobody has reviewed a profile for yet, and enabling it is the one
+        # deliberate step between "I typed a path" and "it started work".
+        enabled=False,
         paths=[str(p).strip() for p in paths if str(p).strip()],
     )
     cfg.libraries.append(lib)

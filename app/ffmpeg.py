@@ -237,8 +237,40 @@ def discard(result: EncodeResult) -> None:
     shutil.rmtree(result.out_path.parent, ignore_errors=True)
 
 
+COPY_CHUNK = 8 * 1024 * 1024
+
+
+def _copy_with_progress(src: Path, dst: Path,
+                        on_progress: ProgressCb | None) -> None:
+    """copy2, in chunks, reporting (percent, MB/s) as it goes.
+
+    The copy back onto the library is often the longest part of a run - it
+    is a whole file over a network share - so it is worth showing rather
+    than leaving the panel looking stalled at 100% of the encode.
+    """
+    total = src.stat().st_size or 1
+    done = 0
+    started = time.monotonic()
+    with open(src, "rb") as r, open(dst, "wb") as w:
+        while True:
+            buf = r.read(COPY_CHUNK)
+            if not buf:
+                break
+            w.write(buf)
+            done += len(buf)
+            if on_progress:
+                elapsed = max(time.monotonic() - started, 1e-6)
+                on_progress(done / total * 100,
+                            done / elapsed / (1024 * 1024))
+        w.flush()
+        os.fsync(w.fileno())
+    # Timestamps and mode, the part of copy2 the loop above does not do.
+    shutil.copystat(src, dst)
+
+
 def replace_original(src: Path, result: EncodeResult, cfg: Config,
-                     lib: LibraryCfg) -> bool:
+                     lib: LibraryCfg,
+                     on_progress: ProgressCb | None = None) -> bool:
     """Move the encode over the original. Returns False if it was rejected.
 
     The new file is staged alongside the original first so the final step is
@@ -253,9 +285,7 @@ def replace_original(src: Path, result: EncodeResult, cfg: Config,
     staged = src.with_name(src.name + ".transcoding.tmp")
 
     try:
-        shutil.copy2(result.out_path, staged)
-        with open(staged, "rb+") as fh:
-            os.fsync(fh.fileno())
+        _copy_with_progress(result.out_path, staged, on_progress)
 
         if cfg.output.chown_uid >= 0 and hasattr(os, "chown"):
             try:

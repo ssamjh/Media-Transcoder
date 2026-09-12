@@ -38,6 +38,9 @@ class ActiveJob:
     library: str = ""
     reasons: list[str] = field(default_factory=list)
     stage: str = "encoding"
+    # When the current stage began, so an ETA for the copy is not computed
+    # from time spent encoding.
+    stage_started: float = 0.0
     mode: str = ""
 
 
@@ -70,6 +73,8 @@ class Engine:
         # the same outcome as the scan that follows.
         self._modes: dict[str, str] = {}
         self._cancelled: set[str] = set()
+        # Serialises the copy back onto the library. See _process_one.
+        self._copy_lock = threading.Lock()
         # Outbound webhooks are queued on their own thread: a mass import can
         # finish a dozen files at once, and none of them should wait on
         # somebody else's HTTP server.
@@ -440,7 +445,11 @@ class Engine:
                 lib_id, self._scan_library = self._scan_library, None
                 try:
                     self.scan(paths, library=lib_id)
-                    self.enqueue_pending()
+                    # A scan only plans. Turning what it found into encodes is
+                    # a separate decision, off by default, so a scan can never
+                    # surprise anyone with work they did not ask for.
+                    if self.cfg.schedule.process_after_scan:
+                        self.enqueue_pending()
                 except Exception:
                     log.exception("scan failed")
                 self.next_scan = (
@@ -471,6 +480,31 @@ class Engine:
                 with self._lock:
                     self._queued.discard(path)
                     self._cancelled.discard(path)
+                    # Cleared here rather than when the encode ends: the job
+                    # stays visible through the copy back, which on a network
+                    # share is the slowest part of the whole run.
+                    self._active.pop(path, None)
+                    self._modes.pop(path, None)
+
+    def _copy_back(self, job: ActiveJob, src: Path,
+                   result: ffmpeg.EncodeResult, lib: LibraryCfg) -> bool:
+        """Put a finished encode onto the library - one file at a time.
+
+        The library is typically a network share, and two copies over one
+        link do not go twice as fast: they halve each other and leave both
+        files in flight for longer. Encoding carries on in the other workers
+        while this one waits its turn, and the job stays on the panel the
+        whole time with the copy's own progress.
+        """
+        def copied(pct: float, mbps: float) -> None:
+            job.percent, job.speed = pct, mbps
+
+        job.stage, job.percent, job.speed = "waiting to copy", 0.0, 0.0
+        job.stage_started = time.time()
+        with self._copy_lock:
+            job.stage, job.stage_started = "copying", time.time()
+            return ffmpeg.replace_original(src, result, self.cfg, lib,
+                                           on_progress=copied)
 
     def _process_one(self, path: str) -> str:
         p = Path(path)
@@ -519,7 +553,8 @@ class Engine:
             return "pending"
 
         job = ActiveJob(path=path, started=time.time(), in_size=plan.size,
-                        library=lib.name, reasons=list(plan.reasons), mode=mode)
+                        library=lib.name, reasons=list(plan.reasons), mode=mode,
+                        stage_started=time.time())
         with self._lock:
             self._active[path] = job
         self.db.set_status(path, "running")
@@ -552,10 +587,6 @@ class Engine:
             self.db.finish_run(run_id, "failed", error=msg)
             log.error("encode failed for %s: %s", p.name, msg)
             return "failed"
-        finally:
-            with self._lock:
-                self._active.pop(path, None)
-                self._modes.pop(path, None)
 
         detail["in_size"] = result.in_size
         detail["out_size"] = result.out_size
@@ -568,7 +599,7 @@ class Engine:
                                result.elapsed, note, detail)
             return "skip"
 
-        if not ffmpeg.replace_original(p, result, self.cfg, lib):
+        if not self._copy_back(job, p, result, lib):
             note = "output was not smaller, original kept"
             self.db.upsert(path, status="skip", error=note,
                            in_size=result.in_size, out_size=result.out_size)
