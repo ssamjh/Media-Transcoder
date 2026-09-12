@@ -88,7 +88,13 @@ class LibOutputCfg:
         default_factory=lambda: ["mjpeg", "png", "bmp", "gif", "webp"]
     )
     replace_original: bool = True
-    only_replace_if_smaller: bool = True
+    # An accepted encode has to land inside this window, as a fraction of the
+    # source size. The ceiling catches work that did not pay off; the floor
+    # catches an encode that came out impossibly small - which, now that a
+    # run can *add* a stereo track, is a far more useful pair of questions
+    # than "is it smaller".
+    min_size_ratio: float = 0.30
+    max_size_ratio: float = 1.10
 
 
 @dataclass
@@ -429,8 +435,17 @@ LIB_META: dict[str, dict[str, Any]] = {
         "desc": "Replace the source file once an encode verifies. Off means "
                 "encodes are produced and then discarded, which is useful for "
                 "testing settings against real files."},
-    "output.only_replace_if_smaller": {
-        "desc": "Throw the encode away if it came out bigger than the source."},
+    "output.min_size_ratio": {
+        "desc": "Reject an encode smaller than this fraction of the source - "
+                "an implausible shrink usually means something was lost. 0 "
+                "turns the floor off.",
+        "min": 0.0, "max": 1.0},
+    "output.max_size_ratio": {
+        "desc": "Reject an encode larger than this fraction of the source. "
+                "1.0 means it must shrink; a little over 1 allows for a run "
+                "that adds a stereo track to an already-efficient file. 10 "
+                "effectively turns the ceiling off.",
+        "min": 0.1, "max": 10.0},
 
     "notify.enabled": {
         "desc": "Call other applications once a processed file has been "
@@ -657,6 +672,13 @@ def _validate_profile(lib: LibraryCfg) -> None:
         raise ConfigError(
             "video height bands must increase: sd_max_height <= "
             "h720_max_height <= h1080_max_height"
+        )
+
+    o = lib.output
+    if o.min_size_ratio and o.max_size_ratio and o.min_size_ratio > o.max_size_ratio:
+        raise ConfigError(
+            "output.min_size_ratio must not be above output.max_size_ratio, "
+            "or no encode could ever be accepted"
         )
 
     for url in lib.notify.urls:
@@ -989,6 +1011,26 @@ def _fill(obj: Any, data: dict[str, Any], where: str) -> None:
             setattr(obj, key, value)
 
 
+def _migrate_library(raw: dict[str, Any]) -> dict[str, Any]:
+    """Translate settings that have been replaced, so old files still load.
+
+    _fill rejects unknown keys, which is what catches typos - so a renamed
+    setting has to be handled here or every existing config.toml would fail
+    to load on upgrade.
+    """
+    out = dict(raw)
+    output = dict(out.get("output") or {})
+    if "only_replace_if_smaller" in output:
+        # Became a size window. True was "it must shrink", false was "accept
+        # whatever comes out"; neither said anything about a floor, so the
+        # floor stays off for a config that predates it.
+        must_shrink = bool(output.pop("only_replace_if_smaller"))
+        output.setdefault("max_size_ratio", 1.0 if must_shrink else 10.0)
+        output.setdefault("min_size_ratio", 0.0)
+        out["output"] = output
+    return out
+
+
 def _from_dict(data: dict[str, Any]) -> Config:
     cfg = Config()
     data = dict(data)
@@ -1001,7 +1043,7 @@ def _from_dict(data: dict[str, Any]) -> Config:
         cfg.libraries = []
         for i, raw in enumerate(raw_libs):
             lib = LibraryCfg()
-            _fill(lib, raw, f"libraries[{i}].")
+            _fill(lib, _migrate_library(raw), f"libraries[{i}].")
             if not raw.get("id"):
                 lib.id = slugify(lib.name, {l.id for l in cfg.libraries})
             cfg.libraries.append(lib)

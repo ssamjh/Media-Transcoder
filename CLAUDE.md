@@ -46,7 +46,9 @@ port but never starts worker threads, so it touches nothing.
   of ours is running, which is the same reasoning behind `db` resetting `running` rows.
 - **Nothing overwrites a source until it verifies** (`ffmpeg._verify` → `replace_original`):
   encode to temp dir, re-probe, check stream count and ≥`min_duration_ratio` of source
-  duration, discard if larger, stage next to the original, `os.replace` into place.
+  duration, discard unless the size lands inside the library's
+  `min_size_ratio`..`max_size_ratio` window (`ffmpeg.size_verdict`, which also writes
+  the rejection note), stage next to the original, `os.replace` into place.
 
 ## Architecture
 

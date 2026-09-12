@@ -28,7 +28,7 @@ Each is independently switchable per library.
 | **Video** | 720p → x265 CRF 23, 1080p → CRF 22. Already-HEVC is copied, never re-encoded. SD (≤576p) cleaned but not re-encoded. Above 1200p left alone entirely. | Every video stream copied untouched, and the height ceiling no longer applies — a 4K file still gets its audio and subtitles cleaned. |
 | **Audio** | Keeps the best track — preferred language, not commentary, sane channel layout, widely supported codec — plus an AAC 2.0 downmix as default, titled `Stereo` (`audio.stereo_title`) whether it was encoded or adopted. An existing stereo track is re-used, not rebuilt. `keep_best_only` and `add_stereo_downmix` are separate switches. | Every audio track copied untouched, dispositions left alone. |
 | **Subtitles** | Keeps configured languages only. If none match and there is exactly one *unlabelled* track, that one is kept. | Every subtitle track copied untouched. |
-| **Output** | Container normalised to MKV (or `keep` to leave the extension alone), cover art dropped, originals replaced once verified. | — |
+| **Output** | Container normalised to MKV (or `keep` to leave the extension alone), cover art dropped, originals replaced once verified and inside the size window (30%–110% of the source by default). | — |
 | **Notifications** | Once the verified file is back in place, calls the URLs you list — Jellyfin, Plex, anything with an HTTP endpoint. Queued and delivered in the background. | Nothing is called. |
 
 Chapters and metadata are always preserved.
@@ -279,7 +279,12 @@ Nothing overwrites a source file until the encode has been verified:
 - the output is re-probed — it must have a video stream, the expected stream
   count, and at least 98% of the source duration, which catches truncated
   encodes that still exit 0
-- the result is discarded if it came out larger than the source
+- the result is discarded unless its size lands inside the library's window,
+  `output.min_size_ratio` to `output.max_size_ratio` (30%–110% of the source by
+  default). The ceiling catches an encode that did not pay off, allowing a
+  little room for the stereo track a run may have added; the floor catches one
+  that came back implausibly small. Set the floor to 0 or the ceiling to 10 to
+  turn either off
 - the verified file is staged next to the original and moved into place with
   `os.replace`, so a crash mid-copy can never leave a half-written file
 - three failed attempts and a file is left alone until you retry it

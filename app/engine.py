@@ -600,7 +600,9 @@ class Engine:
             return "skip"
 
         if not self._copy_back(job, p, result, lib):
-            note = "output was not smaller, original kept"
+            note = (ffmpeg.size_verdict(result.in_size, result.out_size,
+                                        lib.output)
+                    or "output was rejected") + ", original kept"
             self.db.upsert(path, status="skip", error=note,
                            in_size=result.in_size, out_size=result.out_size)
             self.db.finish_run(run_id, "rejected", result.in_size, result.out_size,

@@ -15,7 +15,7 @@ import threading
 import time
 
 from app import ffmpeg
-from app.config import Config, add_library
+from app.config import Config, LibOutputCfg, add_library
 from app.db import Db
 from app.engine import ActiveJob, Engine
 
@@ -175,3 +175,45 @@ class CopyBackTest(unittest.TestCase):
         released.set()
         t1.join(timeout=5)
         t2.join(timeout=5)
+
+
+class SizeVerdictTest(unittest.TestCase):
+    """Which encodes are worth keeping.
+
+    "Smaller than the source" stopped being the right question when a run
+    started adding a stereo track: a file that was already efficient can come
+    back a little larger for a good reason.
+    """
+
+    def setUp(self):
+        self.out = LibOutputCfg()
+
+    def verdict(self, percent: float, in_size: int = 1_000_000):
+        return ffmpeg.size_verdict(in_size, int(in_size * percent / 100), self.out)
+
+    def test_the_default_window_accepts_a_normal_encode(self):
+        for percent in (30, 55, 100, 110):
+            self.assertIsNone(self.verdict(percent), f"{percent}%")
+
+    def test_a_file_that_grew_too_much_is_rejected(self):
+        reason = self.verdict(140)
+        self.assertIn("140.0%", reason)
+        self.assertIn("110% ceiling", reason)
+
+    def test_a_slightly_larger_file_is_kept(self):
+        """The stereo track this tool adds has to be allowed to cost something."""
+        self.assertIsNone(self.verdict(104))
+
+    def test_an_implausibly_small_file_is_rejected(self):
+        reason = self.verdict(8)
+        self.assertIn("8.0%", reason)
+        self.assertIn("30% floor", reason)
+
+    def test_zero_turns_a_bound_off(self):
+        self.out.min_size_ratio = 0.0
+        self.assertIsNone(self.verdict(1))
+        self.out.max_size_ratio = 10.0
+        self.assertIsNone(self.verdict(900))
+
+    def test_an_unknown_source_size_is_not_judged(self):
+        self.assertIsNone(ffmpeg.size_verdict(0, 5_000_000, self.out))

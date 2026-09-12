@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .config import Config, LibraryCfg
+from .config import Config, LibOutputCfg, LibraryCfg
 from .plan import FilePlan
 from .probe import ProbeError, probe_file
 
@@ -240,6 +240,26 @@ def discard(result: EncodeResult) -> None:
 COPY_CHUNK = 8 * 1024 * 1024
 
 
+def size_verdict(in_size: int, out_size: int, out_cfg: LibOutputCfg) -> str | None:
+    """None if the encode is an acceptable size, else why it was rejected.
+
+    "Smaller than the source" is the wrong question once a run can add a
+    stereo track: a file that was already efficient can legitimately come
+    back slightly larger, while one that comes back at a tenth of the size
+    has almost certainly lost something the other checks did not catch.
+    """
+    if not in_size:
+        return None
+    pct = out_size / in_size * 100
+    if out_cfg.max_size_ratio and pct > out_cfg.max_size_ratio * 100:
+        return (f"output was {pct:.1f}% of the source, over the "
+                f"{out_cfg.max_size_ratio * 100:.0f}% ceiling")
+    if out_cfg.min_size_ratio and pct < out_cfg.min_size_ratio * 100:
+        return (f"output was {pct:.1f}% of the source, under the "
+                f"{out_cfg.min_size_ratio * 100:.0f}% floor")
+    return None
+
+
 def _copy_with_progress(src: Path, dst: Path,
                         on_progress: ProgressCb | None) -> None:
     """copy2, in chunks, reporting (percent, MB/s) as it goes.
@@ -277,7 +297,7 @@ def replace_original(src: Path, result: EncodeResult, cfg: Config,
     an os.replace on one filesystem - if the process dies mid-copy the
     library still holds a complete file, never a half-written one.
     """
-    if lib.output.only_replace_if_smaller and result.out_size >= result.in_size:
+    if size_verdict(result.in_size, result.out_size, lib.output):
         shutil.rmtree(result.out_path.parent, ignore_errors=True)
         return False
 

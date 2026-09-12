@@ -202,6 +202,40 @@ class TestLibraries(unittest.TestCase):
         self.assertEqual(c.library_for("/media/Home/x/y.mkv").id, "home-video")
 
 
+class TestMigration(unittest.TestCase):
+    """Settings that were renamed still load from an existing config file."""
+
+    HEAD = """
+[[libraries]]
+name = "TV"
+paths = ["/media/TV"]
+[libraries.output]
+"""
+
+    def load(self, body: str) -> Config:
+        return cfgmod.loads(self.HEAD + body)
+
+    def test_only_replace_if_smaller_true_becomes_a_ceiling_of_one(self):
+        out = self.load("only_replace_if_smaller = true").libraries[0].output
+        self.assertEqual(out.max_size_ratio, 1.0)
+        self.assertEqual(out.min_size_ratio, 0.0)   # it never had a floor
+
+    def test_only_replace_if_smaller_false_lifts_the_ceiling(self):
+        out = self.load("only_replace_if_smaller = false").libraries[0].output
+        self.assertEqual(out.max_size_ratio, 10.0)
+
+    def test_an_explicit_new_setting_wins_over_the_old_one(self):
+        out = self.load("""
+only_replace_if_smaller = true
+max_size_ratio = 1.5
+""").libraries[0].output
+        self.assertEqual(out.max_size_ratio, 1.5)
+
+    def test_a_genuinely_unknown_key_is_still_an_error(self):
+        with self.assertRaises(ConfigError):
+            self.load("only_replace_if_bigger = true")
+
+
 class TestValidation(unittest.TestCase):
     def setUp(self):
         self.c = one_library()
@@ -235,6 +269,11 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(ConfigError):
             cfgmod.apply_library_updates(self.c, self.lib,
                                          {"video.crf_1080p": "high"})
+
+    def test_rejects_a_size_window_that_accepts_nothing(self):
+        with self.assertRaises(ConfigError):
+            cfgmod.apply_library_updates(self.c, self.lib, {
+                "output.min_size_ratio": 0.9, "output.max_size_ratio": 0.5})
 
     def test_rejects_inconsistent_height_bands(self):
         with self.assertRaises(ConfigError):
