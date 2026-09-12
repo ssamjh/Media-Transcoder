@@ -1,0 +1,547 @@
+"""Web API, driven against a real server on an ephemeral port.
+
+No media is touched: the daemon's worker threads are never started, so these
+exercise routing, validation, persistence and the state layer only.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app import config as cfgmod      # noqa: E402
+from app.config import Config         # noqa: E402
+from app.db import Db                 # noqa: E402
+from app.engine import Engine         # noqa: E402
+from app.web import serve             # noqa: E402
+
+
+class ApiTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        cls.config_path = root / "config.toml"
+
+        cfg = Config()
+        cfg.state_db = str(root / "state.db")
+        cfg.libraries[0].id, cfg.libraries[0].name = "tv", "TV"
+        cfg.libraries[0].paths = [str(root / "media" / "TV")]
+        cfgmod.add_library(cfg, "Movies", [str(root / "media" / "Movies")])
+        cfg.output.temp_dir = str(root / "temp")
+        cfg.schedule.enabled = False
+        cfg.web.host = "127.0.0.1"
+        cfg.web.port = 0            # let the OS pick a free port
+        cfgmod.save(cfg, cls.config_path)
+
+        cls.cfg = cfg
+        cls.db = Db(cfg.state_db)
+        cls.engine = Engine(cfg, cls.db, config_path=str(cls.config_path))
+        cls.httpd = serve(cfg, cls.engine)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+        # Fixture paths go through the same normalisation the API applies, so
+        # these tests behave the same on POSIX and Windows.
+        cls.A = str(Path("/media/TV/A.mkv"))
+        cls.B = str(Path("/media/Movies/B.mkv"))
+
+    def setUp(self):
+        """Reset to two tracked files, with no media behind them.
+
+        Several endpoints mutate state, so each test starts from the same
+        place rather than depending on execution order.
+        """
+        with self.db._lock:
+            self.db._conn.execute("DELETE FROM files")
+            self.db._conn.execute("DELETE FROM history")
+            self.db._conn.commit()
+        with self.engine._lock:
+            self.engine._queued.clear()
+            self.engine._cancelled.clear()
+        self.db.upsert(self.A, size=1000, mtime=1.0, status="pending",
+                       library="tv",
+                       reasons=["encode video h264 -> x265 crf 22"], height=1080,
+                       video_codec="h264")
+        self.db.upsert(self.B, size=500, mtime=1.0, status="failed",
+                       library="movies", reasons=[], height=720,
+                       video_codec="h264", error="boom", attempts=3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.db.close()
+        cls.tmp.cleanup()
+
+    # --- helpers ----------------------------------------------------------
+
+    def get(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=10) as r:
+            return json.loads(r.read()), r.status
+
+    def post(self, path, payload=None):
+        req = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(payload or {}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read()), r.status
+        except urllib.error.HTTPError as e:
+            return json.loads(e.read()), e.code
+
+    def get_raw(self, path):
+        try:
+            with urllib.request.urlopen(self.base + path, timeout=10) as r:
+                return r.read(), r.status, r.headers.get("Content-Type")
+        except urllib.error.HTTPError as e:
+            return e.read(), e.code, None
+
+    # --- static -----------------------------------------------------------
+
+    def test_panel_and_assets_are_served(self):
+        for path, ctype in [("/", "text/html"), ("/app.css", "text/css"),
+                            ("/app.js", "text/javascript")]:
+            body, status, got = self.get_raw(path)
+            self.assertEqual(status, 200, path)
+            self.assertIn(ctype, got, path)
+            self.assertGreater(len(body), 100, path)
+
+    def test_unknown_route_is_404(self):
+        _, status, _ = self.get_raw("/api/nope")
+        self.assertEqual(status, 404)
+
+    # --- reads ------------------------------------------------------------
+
+    def test_status(self):
+        d, _ = self.get("/api/status")
+        for key in ("counts", "active", "queued", "recent", "workers",
+                    "schedule_enabled", "bytes_saved", "queue_depth"):
+            self.assertIn(key, d)
+        self.assertEqual(d["counts"]["pending"], 1)
+        self.assertEqual(d["counts"]["failed"], 1)
+
+    def test_files_filter_search_and_paging(self):
+        d, _ = self.get("/api/files?status=all")
+        self.assertEqual(d["total"], 2)
+
+        d, _ = self.get("/api/files?status=failed")
+        self.assertEqual(d["total"], 1)
+        self.assertEqual(d["files"][0]["name"], "B.mkv")
+
+        d, _ = self.get("/api/files?q=A")
+        self.assertEqual(d["total"], 1)
+
+        d, _ = self.get("/api/files?status=all&limit=1&offset=1")
+        self.assertEqual(len(d["files"]), 1)
+        self.assertEqual(d["total"], 2)
+
+    def test_files_reasons_come_back_parsed(self):
+        d, _ = self.get("/api/files?q=A.mkv")
+        self.assertEqual(d["files"][0]["reasons"],
+                         ["encode video h264 -> x265 crf 22"])
+
+    def test_file_detail(self):
+        d, _ = self.get("/api/file?path=" + urllib.parse.quote(self.A))
+        self.assertEqual(d["file"]["name"], "A.mkv")
+        self.assertIn("history", d)
+        self.assertIn("max_attempts", d)
+
+    def test_file_detail_requires_a_known_path(self):
+        _, status, _ = self.get_raw("/api/file?path=" + urllib.parse.quote(str(Path("/media/TV/missing.mkv"))))
+        self.assertEqual(status, 404)
+
+    def test_file_detail_requires_a_path(self):
+        _, status, _ = self.get_raw("/api/file")
+        self.assertEqual(status, 400)
+
+    # --- actions ----------------------------------------------------------
+
+    def test_scan_is_accepted(self):
+        d, status = self.post("/api/scan")
+        self.assertEqual(status, 200)
+        self.assertTrue(d["ok"])
+
+    def test_process_requires_an_existing_file(self):
+        d, status = self.post("/api/process", {"path": self.A})
+        self.assertEqual(status, 200)
+        self.assertFalse(d["ok"])          # tracked, but not on disk
+        self.assertIn("does not exist", d["message"])
+
+    def test_process_requires_a_path(self):
+        d, status = self.post("/api/process", {})
+        self.assertEqual(status, 400)
+        self.assertIn("path is required", d["error"])
+
+    def test_retry_resets_failures(self):
+        d, status = self.post("/api/retry")
+        self.assertEqual(status, 200)
+        self.assertIn("reset 1", d["message"])
+        row = self.db.get(self.B)
+        self.assertEqual(row["attempts"], 0)
+        self.assertIsNone(row["error"])
+        # retry also queues what it reset, so nothing is left failed
+        self.assertEqual(self.get("/api/status")[0]["counts"]["failed"], 0)
+
+    def test_cancel_reports_when_not_queued(self):
+        d, _ = self.post("/api/cancel", {"path": self.A})
+        self.assertFalse(d["ok"])
+
+    def test_bad_json_is_rejected(self):
+        req = urllib.request.Request(
+            self.base + "/api/config", data=b"{oops",
+            headers={"Content-Type": "application/json"}, method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(ctx.exception.code, 400)
+
+    # --- config -----------------------------------------------------------
+
+    def test_config_get_returns_schema_and_file(self):
+        d, _ = self.get("/api/config")
+        self.assertTrue(d["schema"])
+        self.assertIn("[libraries.video]", d["toml"])
+        self.assertEqual(d["path"], str(self.config_path))
+
+    def test_config_update_persists_to_disk(self):
+        d, status = self.post("/api/config",
+                              {"updates": {"workers.pools": 9}})
+        self.assertEqual(status, 200)
+        self.assertEqual(d["changed"], ["workers.pools"])
+        self.assertEqual(self.cfg.workers.pools, 9)
+        self.assertEqual(cfgmod.load(self.config_path).workers.pools, 9)
+
+    def test_files_can_be_filtered_by_library(self):
+        d, _ = self.get("/api/files?status=all&library=tv")
+        self.assertEqual(d["total"], 1)
+        self.assertEqual(d["files"][0]["name"], "A.mkv")
+
+    # --- libraries --------------------------------------------------------
+
+    def test_libraries_listing(self):
+        d, _ = self.get("/api/libraries")
+        ids = [l["id"] for l in d["libraries"]]
+        self.assertEqual(ids, ["tv", "movies"])
+        tv = d["libraries"][0]
+        self.assertTrue(tv["schema"])
+        self.assertIn("video", tv["stages"])
+        self.assertEqual(tv["stats"]["counts"].get("pending"), 1)
+
+    def test_library_update_persists_and_is_independent(self):
+        d, status = self.post("/api/libraries/update", {
+            "id": "movies",
+            "updates": {"video.enabled": False, "subtitles.enabled": False},
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(sorted(d["changed"]),
+                         ["subtitles.enabled", "video.enabled"])
+
+        saved = cfgmod.load(self.config_path)
+        self.assertFalse(saved.library("movies").video.enabled)
+        # the other library is untouched
+        self.assertTrue(saved.library("tv").video.enabled)
+        self.assertTrue(saved.library("tv").subtitles.enabled)
+
+        self.post("/api/libraries/update", {
+            "id": "movies",
+            "updates": {"video.enabled": True, "subtitles.enabled": True},
+        })
+
+    def test_library_update_rejects_bad_values_without_writing(self):
+        before = self.config_path.read_text(encoding="utf-8")
+        d, status = self.post("/api/libraries/update",
+                              {"id": "tv", "updates": {"video.crf_1080p": 999}})
+        self.assertEqual(status, 400)
+        self.assertIn("at most 51", d["error"])
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
+
+    def test_library_update_unknown_id(self):
+        _, status = self.post("/api/libraries/update",
+                              {"id": "nope", "updates": {}})
+        self.assertEqual(status, 404)
+
+    def test_library_add_and_delete(self):
+        root = str(Path(self.tmp.name) / "media" / "Music")
+        d, status = self.post("/api/libraries/add",
+                              {"name": "Concerts", "paths": [root]})
+        self.assertEqual(status, 200)
+        self.assertEqual(d["id"], "concerts")
+        self.assertIn("concerts", [l["id"] for l in d["libraries"]])
+        self.assertTrue(cfgmod.load(self.config_path).library("concerts"))
+
+        d, status = self.post("/api/libraries/delete", {"id": "concerts"})
+        self.assertEqual(status, 200)
+        self.assertNotIn("concerts", [l["id"] for l in d["libraries"]])
+        self.assertIsNone(cfgmod.load(self.config_path).library("concerts"))
+
+    def test_library_add_accepts_newline_separated_paths(self):
+        base = Path(self.tmp.name) / "media"
+        d, status = self.post("/api/libraries/add", {
+            "name": "Kids",
+            "paths": str(base / "Kids") + "\n" + str(base / "Cartoons"),
+        })
+        self.assertEqual(status, 200)
+        lib = next(l for l in d["libraries"] if l["id"] == "kids")
+        self.assertEqual(len(lib["paths"]), 2)
+        self.post("/api/libraries/delete", {"id": "kids"})
+
+    def test_library_add_rejects_overlap(self):
+        d, status = self.post("/api/libraries/add", {
+            "name": "Dupe", "paths": [str(Path(self.tmp.name) / "media" / "TV")],
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("overlaps", d["error"])
+
+    def test_library_add_rejects_missing_name(self):
+        _, status = self.post("/api/libraries/add",
+                              {"name": "", "paths": ["/x"]})
+        self.assertEqual(status, 400)
+
+    def test_deleting_a_library_forgets_its_files(self):
+        base = Path(self.tmp.name) / "media"
+        self.post("/api/libraries/add",
+                  {"name": "Temp", "paths": [str(base / "Temp")]})
+        tracked = str(Path("/media/Temp/x.mkv"))
+        self.db.upsert(tracked, size=1, mtime=1.0, status="pending",
+                       library="temp")
+        self.assertIsNotNone(self.db.get(tracked))
+        self.post("/api/libraries/delete", {"id": "temp"})
+        self.assertIsNone(self.db.get(tracked))
+
+    def test_cannot_delete_the_last_library(self):
+        self.post("/api/libraries/delete", {"id": "movies"})
+        d, status = self.post("/api/libraries/delete", {"id": "tv"})
+        self.assertEqual(status, 400)
+        self.post("/api/libraries/add", {
+            "name": "Movies",
+            "paths": [str(Path(self.tmp.name) / "media" / "Movies")]})
+
+    def test_scan_accepts_a_library(self):
+        d, status = self.post("/api/scan", {"library": "tv"})
+        self.assertEqual(status, 200)
+        self.assertTrue(d["ok"])
+
+    def test_scan_rejects_an_unknown_library(self):
+        _, status = self.post("/api/scan", {"library": "nope"})
+        self.assertEqual(status, 404)
+
+    def test_status_lists_libraries(self):
+        d, _ = self.get("/api/status")
+        self.assertEqual([l["id"] for l in d["libraries"]], ["tv", "movies"])
+
+    def test_config_update_reports_restart_only_fields(self):
+        d, _ = self.post("/api/config", {"updates": {"workers.count": 7}})
+        self.assertIn("workers.count", d["needs_restart"])
+
+    def test_config_update_rejects_bad_values_without_writing(self):
+        before = self.config_path.read_text(encoding="utf-8")
+        d, status = self.post("/api/config", {"updates": {"web.port": 0}})
+        self.assertEqual(status, 400)
+        self.assertIn("at least 1", d["error"])
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
+
+    def test_config_update_requires_an_object(self):
+        _, status = self.post("/api/config", {"updates": "nope"})
+        self.assertEqual(status, 400)
+
+    def test_schedule_toggle_persists(self):
+        d, _ = self.post("/api/schedule", {"enabled": True})
+        self.assertTrue(d["enabled"])
+        self.assertTrue(cfgmod.load(self.config_path).schedule.enabled)
+
+        self.post("/api/schedule", {"enabled": False})
+        self.assertFalse(cfgmod.load(self.config_path).schedule.enabled)
+
+    def test_schedule_requires_enabled(self):
+        _, status = self.post("/api/schedule", {})
+        self.assertEqual(status, 400)
+
+    # --- modes ------------------------------------------------------------
+
+    def test_modes_listing(self):
+        d, _ = self.get("/api/modes")
+        self.assertEqual([m["id"] for m in d["modes"]], ["all", "cleanup"])
+        cleanup = d["modes"][1]
+        self.assertEqual(cleanup["overrides"], {"video.enabled": False})
+        self.assertTrue(cleanup["schema"])
+        self.assertIn("video.enabled", d["library_keys"])
+
+    def test_library_keys_exclude_identity_and_routing(self):
+        d, _ = self.get("/api/modes")
+        for key in ("id", "name", "enabled", "paths"):
+            self.assertNotIn(key, d["library_keys"])
+
+    def test_process_accepts_a_mode(self):
+        # No media behind the fixture, so it cannot actually queue - but the
+        # mode is accepted and echoed rather than rejected.
+        d, status = self.post("/api/process", {"path": self.A, "mode": "cleanup"})
+        self.assertEqual(status, 200)
+        self.assertEqual(d["mode"], "cleanup")
+
+    def test_process_rejects_an_unknown_mode(self):
+        d, status = self.post("/api/process", {"path": self.A, "mode": "nope"})
+        self.assertEqual(status, 400)
+        self.assertIn("no such mode", d["error"])
+        self.assertIn("cleanup", d["error"])
+
+    def test_process_without_a_mode_is_unchanged(self):
+        d, status = self.post("/api/process", {"path": self.A})
+        self.assertEqual(status, 200)
+        self.assertIsNone(d["mode"])
+
+    def test_process_requires_a_path_before_a_mode(self):
+        _, status = self.post("/api/process", {"mode": "cleanup"})
+        self.assertEqual(status, 400)
+
+    def test_check_rejects_an_unknown_mode(self):
+        _, status = self.post("/api/check", {"path": self.A, "mode": "nope"})
+        self.assertEqual(status, 400)
+
+    def test_mode_add_update_and_delete(self):
+        d, status = self.post("/api/modes/add",
+                              {"name": "Subs only",
+                               "overrides": {"video.enabled": "false",
+                                             "audio.enabled": "false"}})
+        self.assertEqual(status, 200, d)
+        self.assertEqual(d["id"], "subs-only")
+
+        saved = cfgmod.load(self.config_path).mode("subs-only")
+        self.assertEqual(saved.overrides,
+                         {"video.enabled": False, "audio.enabled": False})
+
+        d, status = self.post("/api/modes/update",
+                              {"id": "subs-only",
+                               "updates": {"description": "Subtitles only."}})
+        self.assertEqual(status, 200, d)
+        self.assertEqual(
+            cfgmod.load(self.config_path).mode("subs-only").description,
+            "Subtitles only.")
+
+        d, status = self.post("/api/modes/delete", {"id": "subs-only"})
+        self.assertEqual(status, 200, d)
+        self.assertIsNone(cfgmod.load(self.config_path).mode("subs-only"))
+
+    def test_mode_add_rejects_a_bad_override_without_writing(self):
+        before = self.config_path.read_text(encoding="utf-8")
+        _, status = self.post("/api/modes/add",
+                              {"name": "Bad", "overrides": {"video.nonsense": 1}})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
+
+    def test_mode_add_rejects_a_missing_name(self):
+        _, status = self.post("/api/modes/add", {"overrides": {}})
+        self.assertEqual(status, 400)
+
+    def test_mode_update_unknown_id(self):
+        _, status = self.post("/api/modes/update",
+                              {"id": "nope", "updates": {"name": "x"}})
+        self.assertEqual(status, 404)
+
+    def test_mode_update_rejects_bad_values_without_writing(self):
+        before = self.config_path.read_text(encoding="utf-8")
+        _, status = self.post("/api/modes/update",
+                              {"id": "cleanup",
+                               "updates": {"overrides": {"video.crf_1080p": 99}}})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.engine.cfg.mode("cleanup").overrides,
+                         {"video.enabled": False})
+
+    def test_mode_delete_unknown_id(self):
+        _, status = self.post("/api/modes/delete", {"id": "nope"})
+        self.assertEqual(status, 400)
+
+
+class ApiKeyTest(unittest.TestCase):
+    """With a key configured, /api/ needs it and the panel still works."""
+
+    KEY = "test-key-1234567890"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        cfg = Config()
+        cfg.state_db = str(root / "state.db")
+        cfg.libraries[0].paths = [str(root / "media")]
+        cfg.output.temp_dir = str(root / "temp")
+        cfg.schedule.enabled = False
+        cfg.web.host, cfg.web.port = "127.0.0.1", 0
+        cfg.web.api_key = cls.KEY
+        cls.db = Db(cfg.state_db)
+        cls.engine = Engine(cfg, cls.db)
+        cls.httpd = serve(cfg, cls.engine)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.db.close()
+        cls.tmp.cleanup()
+
+    def fetch(self, path, headers=None, method="GET"):
+        req = urllib.request.Request(
+            self.base + path, headers=headers or {}, method=method,
+            data=b"{}" if method == "POST" else None)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.read(), r.status
+        except urllib.error.HTTPError as e:
+            return e.read(), e.code
+
+    def test_api_without_a_key_is_rejected(self):
+        _, status = self.fetch("/api/status")
+        self.assertEqual(status, 401)
+
+    def test_api_with_a_wrong_key_is_rejected(self):
+        _, status = self.fetch("/api/status", {"X-Api-Key": "wrong"})
+        self.assertEqual(status, 401)
+
+    def test_api_with_the_header_is_accepted(self):
+        _, status = self.fetch("/api/status", {"X-Api-Key": self.KEY})
+        self.assertEqual(status, 200)
+
+    def test_api_with_a_query_parameter_is_accepted(self):
+        _, status = self.fetch("/api/status?apikey=" + self.KEY)
+        self.assertEqual(status, 200)
+
+    def test_api_with_a_bearer_token_is_accepted(self):
+        _, status = self.fetch("/api/status",
+                               {"Authorization": "Bearer " + self.KEY})
+        self.assertEqual(status, 200)
+
+    def test_posting_without_a_key_is_rejected(self):
+        _, status = self.fetch("/api/process", method="POST",
+                               headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 401)
+
+    def test_posting_with_a_key_gets_past_auth(self):
+        _, status = self.fetch(
+            "/api/process", method="POST",
+            headers={"Content-Type": "application/json", "X-Api-Key": self.KEY})
+        self.assertEqual(status, 400)      # rejected for the missing path, not the key
+
+    def test_the_panel_is_served_with_the_key_embedded(self):
+        """Otherwise the UI could not call its own API."""
+        body, status = self.fetch("/")
+        self.assertEqual(status, 200)
+        self.assertIn(self.KEY, body.decode())
+        self.assertNotIn("__API_KEY__", body.decode())
+
+    def test_static_assets_need_no_key(self):
+        for path in ("/", "/app.css", "/app.js"):
+            _, status = self.fetch(path)
+            self.assertEqual(status, 200, path)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

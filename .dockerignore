@@ -1,0 +1,9 @@
+tests/
+config/state.db*
+config/config.toml
+__pycache__/
+*.pyc
+.git/
+.gitignore
+README.md
+LICENSE

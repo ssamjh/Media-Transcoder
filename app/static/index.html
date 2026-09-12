@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Transcoder</title>
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#127916;</text></svg>">
+</head>
+<body>
+<header>
+  <div class="wrap bar">
+    <div class="brand">Transcoder</div>
+    <nav id="tabs">
+      <button data-tab="dashboard" class="on">Dashboard</button>
+      <button data-tab="libraries">Libraries</button>
+      <button data-tab="files">Files</button>
+      <button data-tab="history">History</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+    <div class="spacer"></div>
+    <div id="conn" class="pill">&hellip;</div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- DASHBOARD -->
+  <section id="tab-dashboard">
+    <div class="toolbar">
+      <button id="btn-scan" class="primary">Scan now</button>
+      <button id="btn-queue">Queue pending</button>
+      <button id="btn-cancel-all" class="danger">Cancel all</button>
+      <label class="toggle">
+        <input type="checkbox" id="sched-toggle">
+        <span>Periodic scans</span>
+      </label>
+      <span id="sched-note" class="muted"></span>
+    </div>
+
+    <div id="tiles" class="tiles"></div>
+
+    <h2>Active <span id="active-count" class="count"></span></h2>
+    <div id="active" class="card"><div class="empty">Idle</div></div>
+
+    <h2>Queued <span id="queued-count" class="count"></span></h2>
+    <div id="queued" class="card"><div class="empty">Nothing queued</div></div>
+
+    <h2>Last scan</h2>
+    <div id="scaninfo" class="card"><div class="empty">No scan yet</div></div>
+
+    <h2>Recent</h2>
+    <div id="recent" class="card tablewrap"><div class="empty">Nothing yet</div></div>
+  </section>
+
+  <!-- LIBRARIES -->
+  <section id="tab-libraries" hidden>
+    <div class="toolbar">
+      <button id="l-add" class="primary">Add library</button>
+      <span class="muted">Each library is scanned and processed with its own settings.</span>
+    </div>
+    <div id="libraries"></div>
+  </section>
+
+  <!-- FILES -->
+  <section id="tab-files" hidden>
+    <div class="toolbar">
+      <input id="f-q" type="search" placeholder="Search filenames&hellip;" autocomplete="off">
+      <select id="f-library"><option value="">All libraries</option></select>
+      <select id="f-status">
+        <option value="all">All statuses</option>
+        <option value="pending">Pending</option>
+        <option value="queued">Queued</option>
+        <option value="running">Running</option>
+        <option value="done">Done</option>
+        <option value="skip">Nothing to do</option>
+        <option value="failed">Failed</option>
+      </select>
+      <select id="f-order">
+        <option value="size">Largest first</option>
+        <option value="name">Name</option>
+        <option value="checked">Recently checked</option>
+        <option value="saved">Most saved</option>
+      </select>
+      <div class="spacer"></div>
+      <button id="f-retry-all">Retry all failed</button>
+    </div>
+    <div id="files" class="card tablewrap"><div class="empty">Loading&hellip;</div></div>
+    <div id="files-pager" class="pager"></div>
+  </section>
+
+  <!-- HISTORY -->
+  <section id="tab-history" hidden>
+    <div class="toolbar">
+      <div class="spacer"></div>
+      <button id="h-clear" class="danger">Clear history</button>
+    </div>
+    <div id="history" class="card tablewrap"><div class="empty">Loading&hellip;</div></div>
+    <div id="history-pager" class="pager"></div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" hidden>
+    <div class="toolbar">
+      <button id="s-save" class="primary">Save changes</button>
+      <button id="s-reset">Discard</button>
+      <span id="s-note" class="muted"></span>
+      <div class="spacer"></div>
+      <button id="s-toml">View file</button>
+    </div>
+    <div id="settings"></div>
+
+    <h2>Processing modes</h2>
+    <div class="toolbar">
+      <button id="m-add" class="primary">Add mode</button>
+      <span class="muted">A mode overrides a library's profile for a single
+        <code>/api/process</code> call, then is forgotten.</span>
+    </div>
+    <div id="modes"></div>
+
+    <h2>Integration</h2>
+    <div id="integration" class="card"></div>
+  </section>
+
+</main>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-bg" data-close></div>
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="d-title">
+    <div class="drawer-head">
+      <div id="d-title" class="drawer-title">&nbsp;</div>
+      <button class="icon" data-close aria-label="Close">&times;</button>
+    </div>
+    <div id="d-body" class="drawer-body"></div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script>window.__API_KEY__ = "__API_KEY__";</script>
+<script src="app.js"></script>
+</body>
+</html>
