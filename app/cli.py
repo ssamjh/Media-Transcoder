@@ -170,10 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("modes", help="list, add, change or remove processing modes")
     p.add_argument("-m", "--mode", help="operate on this mode id")
     p.add_argument("--add", metavar="NAME", help="create a mode")
+    p.add_argument("--copy-from", metavar="MODE", dest="copy_from",
+                   help="start the new mode as a copy of this one")
     p.add_argument("--set", action="append", metavar="KEY=VALUE", default=[],
-                   help="override a library setting, e.g. --set video.enabled=false")
-    p.add_argument("--unset", action="append", metavar="KEY", default=[],
-                   help="remove an override, falling back to the library")
+                   help="set a processing setting, e.g. --set video.enabled=false")
     p.add_argument("--name", help="rename the mode")
     p.add_argument("--description", help="set the description")
     p.add_argument("--remove", action="store_true", help="delete the mode")
@@ -185,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--path", action="append", default=[], metavar="DIR",
                    help="path for --add, repeatable")
     p.add_argument("--set", action="append", metavar="KEY=VALUE", default=[],
-                   help="set a library key, e.g. --set subtitles.enabled=false")
+                   help="set a library key, e.g. --set mode=cleanup")
     p.add_argument("--remove", action="store_true", help="delete the library")
     p.add_argument("--json", action="store_true")
     return ap
@@ -304,31 +304,30 @@ def _print_libraries(cfg) -> None:
         return
     rows = []
     for lib in cfg.libraries:
-        stages = ", ".join(filter(None, [
-            "video" if lib.video.enabled else "",
-            "audio" if lib.audio.enabled else "",
-            "subs" if lib.subtitles.enabled else "",
-        ])) or "nothing"
         rows.append([
             lib.id,
             lib.name,
             "yes" if lib.enabled else "no",
-            stages,
-            lib.output.container,
-            "yes" if lib.output.replace_original else "no",
+            lib.mode,
+            str(lib.min_size_mb),
             ", ".join(lib.paths),
         ])
-    print(_table(rows, ["Id", "Name", "On", "Processes", "Container",
-                        "Replace", "Paths"]))
+    print(_table(rows, ["Id", "Name", "On", "Mode", "Min MB", "Paths"]))
 
 
 def _print_modes(cfg) -> None:
     rows = []
     for m in cfg.modes:
-        overrides = ", ".join(f"{k}={_fmt_value(v)}"
-                              for k, v in m.overrides.items()) or "library profile"
-        rows.append([m.id, m.name, overrides])
-    print(_table(rows, ["Mode", "Name", "Overrides"]))
+        stages = ", ".join(filter(None, [
+            "video" if m.video.enabled else "",
+            "audio" if m.audio.enabled else "",
+            "subs" if m.subtitles.enabled else "",
+        ])) or "nothing"
+        users = ", ".join(l.name for l in cfg.libraries if l.mode == m.id) or "-"
+        rows.append([m.id, m.name, stages, m.output.container,
+                     "yes" if m.output.replace_original else "no", users])
+    print(_table(rows, ["Mode", "Name", "Processes", "Container", "Replace",
+                        "Used by"]))
     for m in cfg.modes:
         if m.description:
             print("")
@@ -336,16 +335,10 @@ def _print_modes(cfg) -> None:
             print(f"      {m.description}")
 
 
-def _fmt_value(v) -> str:
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return str(v)
-
-
 def _modes(args, cfg, log) -> int:
     if args.add:
         try:
-            mode = config_mod.add_mode(cfg, args.add)
+            mode = config_mod.add_mode(cfg, args.add, args.copy_from)
         except config_mod.ConfigError as exc:
             log.error("%s", exc)
             return 2
@@ -366,7 +359,7 @@ def _modes(args, cfg, log) -> int:
         print(f"removed mode {mode.name!r}")
         return 0
 
-    if args.set or args.unset or args.name or args.description:
+    if args.set or args.name or args.description:
         if not args.mode:
             log.error("changing a mode needs --mode")
             return 2
@@ -375,17 +368,13 @@ def _modes(args, cfg, log) -> int:
             log.error("no such mode: %s", args.mode)
             return 2
 
-        overrides = dict(mode.overrides)
+        updates = {}
         for item in args.set:
             key, sep, value = item.partition("=")
             if not sep:
                 log.error("--set expects KEY=VALUE, got %r", item)
                 return 2
-            overrides[key.strip()] = value.strip()
-        for key in args.unset:
-            overrides.pop(key.strip(), None)
-
-        updates = {"overrides": overrides}
+            updates[key.strip()] = value.strip()
         if args.name:
             updates["name"] = args.name
         if args.description:
@@ -403,7 +392,11 @@ def _modes(args, cfg, log) -> int:
     if args.json:
         print(json.dumps(
             [{"id": m.id, "name": m.name, "description": m.description,
-              "overrides": m.overrides} for m in cfg.modes], indent=2))
+              "libraries": [l.id for l in cfg.libraries if l.mode == m.id],
+              "settings": {block["section"] or "mode":
+                           {f["name"]: f["value"] for f in block["fields"]}
+                           for block in config_mod.mode_schema(m)}}
+             for m in cfg.modes], indent=2))
     else:
         _print_modes(cfg)
     return 0

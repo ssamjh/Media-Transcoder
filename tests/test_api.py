@@ -209,7 +209,7 @@ class ApiTest(unittest.TestCase):
     def test_config_get_returns_schema_and_file(self):
         d, _ = self.get("/api/config")
         self.assertTrue(d["schema"])
-        self.assertIn("[libraries.video]", d["toml"])
+        self.assertIn("[modes.video]", d["toml"])
         self.assertEqual(d["path"], str(self.config_path))
 
     def test_config_update_persists_to_disk(self):
@@ -237,32 +237,34 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(tv["stats"]["counts"].get("pending"), 1)
 
     def test_library_update_persists_and_is_independent(self):
-        d, status = self.post("/api/libraries/update", {
-            "id": "movies",
-            "updates": {"video.enabled": False, "subtitles.enabled": False},
-        })
+        """Pointing one library at another mode leaves the other alone."""
+        d, status = self.post("/api/libraries/update",
+                              {"id": "movies", "updates": {"mode": "cleanup"}})
         self.assertEqual(status, 200)
-        self.assertEqual(sorted(d["changed"]),
-                         ["subtitles.enabled", "video.enabled"])
+        self.assertEqual(d["changed"], ["mode"])
 
         saved = cfgmod.load(self.config_path)
-        self.assertFalse(saved.library("movies").video.enabled)
-        # the other library is untouched
-        self.assertTrue(saved.library("tv").video.enabled)
-        self.assertTrue(saved.library("tv").subtitles.enabled)
+        self.assertEqual(saved.library("movies").mode, "cleanup")
+        self.assertEqual(saved.library("tv").mode, "standard")
 
-        self.post("/api/libraries/update", {
-            "id": "movies",
-            "updates": {"video.enabled": True, "subtitles.enabled": True},
-        })
+        self.post("/api/libraries/update",
+                  {"id": "movies", "updates": {"mode": "standard"}})
 
     def test_library_update_rejects_bad_values_without_writing(self):
         before = self.config_path.read_text(encoding="utf-8")
         d, status = self.post("/api/libraries/update",
-                              {"id": "tv", "updates": {"video.crf_1080p": 999}})
+                              {"id": "tv", "updates": {"min_size_mb": -5}})
         self.assertEqual(status, 400)
-        self.assertIn("at most 51", d["error"])
+        self.assertIn("at least 0", d["error"])
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
+
+    def test_library_update_rejects_an_unknown_mode(self):
+        d, status = self.post("/api/libraries/update",
+                              {"id": "tv", "updates": {"mode": "nope"}})
+        self.assertEqual(status, 400)
+        self.assertIn("no such processing mode", d["error"])
+        self.assertEqual(cfgmod.load(self.config_path).library("tv").mode,
+                         "standard")
 
     def test_library_update_unknown_id(self):
         _, status = self.post("/api/libraries/update",
@@ -381,16 +383,27 @@ class ApiTest(unittest.TestCase):
 
     def test_modes_listing(self):
         d, _ = self.get("/api/modes")
-        self.assertEqual([m["id"] for m in d["modes"]], ["all", "cleanup"])
+        self.assertEqual([m["id"] for m in d["modes"]], ["standard", "cleanup"])
         cleanup = d["modes"][1]
-        self.assertEqual(cleanup["overrides"], {"video.enabled": False})
+        self.assertFalse(cleanup["stages"]["video"])
         self.assertTrue(cleanup["schema"])
-        self.assertIn("video.enabled", d["library_keys"])
+        keys = {f["key"] for block in cleanup["schema"] for f in block["fields"]}
+        self.assertIn("video.enabled", keys)
+        self.assertIn("output.container", keys)
 
-    def test_library_keys_exclude_identity_and_routing(self):
+    def test_a_mode_lists_the_libraries_using_it(self):
         d, _ = self.get("/api/modes")
-        for key in ("id", "name", "enabled", "paths"):
-            self.assertNotIn(key, d["library_keys"])
+        standard = d["modes"][0]
+        self.assertEqual(sorted(l["id"] for l in standard["libraries"]),
+                         ["movies", "tv"])
+        self.assertEqual(d["modes"][1]["libraries"], [])
+
+    def test_a_library_reports_the_mode_it_uses(self):
+        d, _ = self.get("/api/libraries")
+        tv = next(l for l in d["libraries"] if l["id"] == "tv")
+        self.assertEqual(tv["mode"], "standard")
+        self.assertEqual(tv["mode_name"], "Standard")
+        self.assertTrue(tv["stages"]["video"])
 
     def test_process_accepts_a_mode(self):
         # No media behind the fixture, so it cannot actually queue - but the
@@ -420,37 +433,53 @@ class ApiTest(unittest.TestCase):
 
     def test_mode_add_update_and_delete(self):
         d, status = self.post("/api/modes/add",
-                              {"name": "Subs only",
-                               "overrides": {"video.enabled": "false",
-                                             "audio.enabled": "false"}})
+                              {"name": "Subs only", "copy_from": "cleanup"})
         self.assertEqual(status, 200, d)
         self.assertEqual(d["id"], "subs-only")
 
         saved = cfgmod.load(self.config_path).mode("subs-only")
-        self.assertEqual(saved.overrides,
-                         {"video.enabled": False, "audio.enabled": False})
+        self.assertFalse(saved.video.enabled)          # copied from cleanup
 
         d, status = self.post("/api/modes/update",
                               {"id": "subs-only",
-                               "updates": {"description": "Subtitles only."}})
+                               "updates": {"audio.enabled": "false",
+                                           "description": "Subtitles only."}})
         self.assertEqual(status, 200, d)
-        self.assertEqual(
-            cfgmod.load(self.config_path).mode("subs-only").description,
-            "Subtitles only.")
+        saved = cfgmod.load(self.config_path).mode("subs-only")
+        self.assertFalse(saved.audio.enabled)
+        self.assertEqual(saved.description, "Subtitles only.")
 
         d, status = self.post("/api/modes/delete", {"id": "subs-only"})
         self.assertEqual(status, 200, d)
         self.assertIsNone(cfgmod.load(self.config_path).mode("subs-only"))
 
-    def test_mode_add_rejects_a_bad_override_without_writing(self):
+    def test_mode_update_changes_every_library_using_it(self):
+        d, status = self.post("/api/modes/update",
+                              {"id": "standard",
+                               "updates": {"video.crf_1080p": 19}})
+        self.assertEqual(status, 200, d)
+        saved = cfgmod.load(self.config_path)
+        for lib_id in ("tv", "movies"):
+            self.assertEqual(
+                cfgmod.resolve(saved, saved.library(lib_id)).video.crf_1080p, 19)
+        self.post("/api/modes/update",
+                  {"id": "standard", "updates": {"video.crf_1080p": 22}})
+
+    def test_a_mode_in_use_cannot_be_deleted(self):
+        d, status = self.post("/api/modes/delete", {"id": "standard"})
+        self.assertEqual(status, 400)
+        self.assertIn("in use", d["error"])
+        self.assertIsNotNone(cfgmod.load(self.config_path).mode("standard"))
+
+    def test_mode_add_rejects_an_unknown_source_without_writing(self):
         before = self.config_path.read_text(encoding="utf-8")
         _, status = self.post("/api/modes/add",
-                              {"name": "Bad", "overrides": {"video.nonsense": 1}})
+                              {"name": "Bad", "copy_from": "nope"})
         self.assertEqual(status, 400)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
 
     def test_mode_add_rejects_a_missing_name(self):
-        _, status = self.post("/api/modes/add", {"overrides": {}})
+        _, status = self.post("/api/modes/add", {})
         self.assertEqual(status, 400)
 
     def test_mode_update_unknown_id(self):
@@ -462,11 +491,14 @@ class ApiTest(unittest.TestCase):
         before = self.config_path.read_text(encoding="utf-8")
         _, status = self.post("/api/modes/update",
                               {"id": "cleanup",
-                               "updates": {"overrides": {"video.crf_1080p": 99}}})
+                               "updates": {"video.crf_1080p": 99}})
         self.assertEqual(status, 400)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
-        self.assertEqual(self.engine.cfg.mode("cleanup").overrides,
-                         {"video.enabled": False})
+        # The live mode is what every library on it runs, so a refused save
+        # must leave it exactly as it was.
+        live = self.engine.cfg.mode("cleanup")
+        self.assertEqual(live.video.crf_1080p, 22)
+        self.assertFalse(live.video.enabled)
 
     def test_mode_delete_unknown_id(self):
         _, status = self.post("/api/modes/delete", {"id": "nope"})

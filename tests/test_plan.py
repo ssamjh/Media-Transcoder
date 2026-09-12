@@ -56,12 +56,19 @@ def mk(streams, path="/media/TV/Show/S01E01.mkv", duration=2700.0, size=4 * 2**3
 
 class Base(unittest.TestCase):
     def setUp(self):
+        """A library, and the mode it is treated with.
+
+        The library says where files are; the mode says what happens to
+        them, so the tests below change `self.mode`.
+        """
         self.cfg = Config()
         self.lib = cfgmod.add_library(self.cfg, "Media", ["/media"])
         self.lib.enabled = True
+        self.mode = self.cfg.mode(self.lib.mode)
 
     def plan(self, streams, **kw):
-        return plan_file(mk(streams, **kw), self.lib, self.cfg)
+        profile = cfgmod.resolve(self.cfg, self.lib)
+        return plan_file(mk(streams, **kw), profile, self.cfg)
 
     def kinds(self, p, kind):
         return [s for s in p.streams if s.kind == kind]
@@ -110,7 +117,7 @@ class TestVideo(Base):
         self.assertIn("drop cover art", p.reasons)
 
     def test_cover_art_kept_when_the_library_says_so(self):
-        self.lib.output.drop_cover_art = False
+        self.mode.output.drop_cover_art = False
         p = self.plan([V(0, "hevc", 1080), V(1, "mjpeg", 500, attached=True),
                        A(2, "aac", 2, title="Stereo", default=1)])
         self.assertEqual(len(self.kinds(p, "video")), 2)
@@ -121,7 +128,7 @@ class TestStageSwitches(Base):
     """A library can enable only some of the work."""
 
     def test_video_disabled_copies_video_but_still_cleans(self):
-        self.lib.video.enabled = False
+        self.mode.video.enabled = False
         p = self.plan([V(0, "h264", 1080), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre"), S(3, "eng"), S(4, "jpn")])
         self.assertEqual(p.streams[0].codec, "copy")
@@ -133,7 +140,7 @@ class TestStageSwitches(Base):
 
     def test_video_disabled_ignores_the_height_ceiling(self):
         """4K is only skipped because of encoding; cleaning still applies."""
-        self.lib.video.enabled = False
+        self.mode.video.enabled = False
         p = self.plan([V(0, "h264", 2160), A(1, "eac3", 6, "eng", default=1),
                        S(2, "eng"), S(3, "fre")])
         self.assertIsNone(p.skip_reason)
@@ -141,7 +148,7 @@ class TestStageSwitches(Base):
         self.assertIn("drop unwanted subtitle", p.reasons)
 
     def test_audio_disabled_copies_every_track(self):
-        self.lib.audio.enabled = False
+        self.mode.audio.enabled = False
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre"), A(3, "dts", 8, "jpn")])
         audio = self.kinds(p, "audio")
@@ -151,7 +158,7 @@ class TestStageSwitches(Base):
         self.assertFalse(p.needs_work)
 
     def test_subtitles_disabled_copies_every_track(self):
-        self.lib.subtitles.enabled = False
+        self.mode.subtitles.enabled = False
         p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
                        S(2, "eng"), S(3, "fre"), S(4, "jpn")])
         self.assertEqual(len(self.kinds(p, "subtitle")), 3)
@@ -159,7 +166,7 @@ class TestStageSwitches(Base):
 
     def test_clean_audio_but_not_subtitles(self):
         """The example from the brief."""
-        self.lib.subtitles.enabled = False
+        self.mode.subtitles.enabled = False
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre"), S(3, "fre"), S(4, "jpn")])
         self.assertEqual(len(self.kinds(p, "subtitle")), 2)
@@ -167,16 +174,16 @@ class TestStageSwitches(Base):
         self.assertTrue(any("stereo" in r for r in p.reasons))
 
     def test_everything_off_means_nothing_to_do(self):
-        self.lib.video.enabled = False
-        self.lib.audio.enabled = False
-        self.lib.subtitles.enabled = False
-        self.lib.output.drop_cover_art = False
+        self.mode.video.enabled = False
+        self.mode.audio.enabled = False
+        self.mode.subtitles.enabled = False
+        self.mode.output.drop_cover_art = False
         p = self.plan([V(0, "h264", 1080), A(1, "ac3", 6, "fre"), S(2, "jpn")])
         self.assertFalse(p.needs_work)
         self.assertEqual(len(p.streams), 3)
 
     def test_keep_best_only_off_keeps_every_track(self):
-        self.lib.audio.keep_best_only = False
+        self.mode.audio.keep_best_only = False
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre")])
         audio = self.kinds(p, "audio")
@@ -185,7 +192,7 @@ class TestStageSwitches(Base):
         self.assertNotIn("drop extra audio", p.reasons)
 
     def test_no_stereo_downmix_keeps_just_the_best_track(self):
-        self.lib.audio.add_stereo_downmix = False
+        self.mode.audio.add_stereo_downmix = False
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "ac3", 6, "fre")])
         audio = self.kinds(p, "audio")
@@ -195,7 +202,7 @@ class TestStageSwitches(Base):
         self.assertNotIn("add aac stereo downmix", p.reasons)
 
     def test_container_keep_avoids_a_pointless_remux(self):
-        self.lib.output.container = "keep"
+        self.mode.output.container = "keep"
         p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1)],
                       path="/media/Movies/Film.mp4")
         self.assertEqual(p.container, "mp4")
@@ -229,7 +236,7 @@ class TestSubtitles(Base):
         self.assertEqual(self.kinds(p, "subtitle"), [])
 
     def test_keep_languages_is_configurable(self):
-        self.lib.subtitles.keep_languages = ["fre", "eng"]
+        self.mode.subtitles.keep_languages = ["fre", "eng"]
         p = self.plan([V(0), A(1), S(2, "fre"), S(3, "jpn"), S(4, "eng")])
         self.assertEqual({s.src_index for s in self.kinds(p, "subtitle")}, {2, 4})
 
@@ -332,7 +339,7 @@ class TestSubtitleContainers(Base):
 
     def test_an_image_track_mkv_cannot_hold_is_dropped_not_converted(self):
         """A picture cannot become text, so the only options are drop or fail."""
-        self.lib.subtitles.image_codecs = ["mov_text_pictures"]
+        self.mode.subtitles.image_codecs = ["mov_text_pictures"]
         p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
                        S(2, "eng", codec="mov_text_pictures")])
         self.assertEqual(self.kinds(p, "subtitle"), [])
@@ -340,7 +347,7 @@ class TestSubtitleContainers(Base):
                       p.reasons)
 
     def test_keeping_the_source_container_copies_as_before(self):
-        self.lib.output.container = "keep"
+        self.mode.output.container = "keep"
         p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
                        S(2, "eng", codec="mov_text")],
                       path="/media/TV/a.mp4")
@@ -348,7 +355,7 @@ class TestSubtitleContainers(Base):
 
     def test_disabled_subtitles_still_respect_the_container(self):
         """Which tracks are kept is policy; whether they can be muxed is not."""
-        self.lib.subtitles.enabled = False
+        self.mode.subtitles.enabled = False
         p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
                        S(2, "fre", codec="mov_text"), S(3, "jpn", codec="mov_text")],
                       path="/media/TV/a.mp4")
@@ -395,15 +402,15 @@ class TestIdempotency(Base):
         self.assertIn("remux to mkv", p.reasons)
 
     def test_idempotent_with_every_stage_disabled(self):
-        self.lib.video.enabled = False
-        self.lib.audio.enabled = False
-        self.lib.subtitles.enabled = False
+        self.mode.video.enabled = False
+        self.mode.audio.enabled = False
+        self.mode.subtitles.enabled = False
         streams = [V(0, "h264", 1080), A(1, "ac3", 6, "fre"), S(2, "jpn")]
         for _ in range(3):
             self.assertFalse(self.plan(streams).needs_work)
 
     def test_idempotent_when_keeping_all_audio(self):
-        self.lib.audio.keep_best_only = False
+        self.mode.audio.keep_best_only = False
         after = [
             V(0, "hevc", 1080),
             A(1, "aac", 2, "eng", title="Stereo", default=1),
@@ -415,7 +422,7 @@ class TestIdempotency(Base):
         self.assertFalse(p.needs_work, f"unexpected work: {p.reasons}")
 
     def test_idempotent_without_a_stereo_downmix(self):
-        self.lib.audio.add_stereo_downmix = False
+        self.mode.audio.add_stereo_downmix = False
         after = [V(0, "hevc", 1080), A(1, "eac3", 6, "eng", default=1), S(2, "eng")]
         for _ in range(3):
             self.assertFalse(self.plan(after).needs_work)
@@ -462,31 +469,40 @@ class TestArgs(Base):
 
 
 class TestLibraryRouting(unittest.TestCase):
-    def test_each_library_uses_its_own_profile(self):
+    def test_each_library_is_planned_under_its_own_mode(self):
         cfg = Config()
         cfgmod.add_library(cfg, "TV", ["/media/TV"]).enabled = True
         cfgmod.add_library(cfg, "Movies", ["/media/Movies"]).enabled = True
         tv, movies = cfg.library("tv"), cfg.library("movies")
-        movies.video.enabled = False
-        movies.subtitles.enabled = False
+
+        # Movies gets a mode of its own; TV stays on the shared default.
+        light = cfgmod.add_mode(cfg, "Light", copy_from=tv.mode)
+        light.video.enabled = False
+        light.subtitles.enabled = False
+        movies.mode = light.id
 
         streams = [V(0, "h264", 1080), A(1, "eac3", 6, "eng", default=1),
                    S(2, "fre")]
-        tv_plan = plan_file(mk(streams, path="/media/TV/a.mkv"), tv, cfg)
-        mv_plan = plan_file(mk(streams, path="/media/Movies/b.mkv"), movies, cfg)
+        tv_plan = plan_file(mk(streams, path="/media/TV/a.mkv"),
+                            cfgmod.resolve(cfg, tv), cfg)
+        mv_plan = plan_file(mk(streams, path="/media/Movies/b.mkv"),
+                            cfgmod.resolve(cfg, movies), cfg)
 
         vid = lambda pl: [s for s in pl.streams if s.kind == "video"]
         self.assertTrue(any(s.is_encode for s in vid(tv_plan)))
         self.assertIn("drop unwanted subtitle", tv_plan.reasons)
 
-        # Movies has video encoding off, but audio cleaning still on, so it
-        # adds a stereo downmix while leaving the video stream alone.
+        # The Light mode has video encoding off, but audio cleaning still on,
+        # so it adds a stereo downmix while leaving the video stream alone.
         self.assertFalse(any(s.is_encode for s in vid(mv_plan)))
         self.assertNotIn("drop unwanted subtitle", mv_plan.reasons)
         self.assertTrue(any(s.is_encode for s in mv_plan.streams
                             if s.kind == "audio"))
+        # The plan belongs to the library, whichever mode produced it.
         self.assertEqual(mv_plan.library, "movies")
         self.assertEqual(mv_plan.library_name, "Movies")
+        self.assertEqual(mv_plan.mode, "light")
+        self.assertEqual(tv_plan.mode, "standard")
 
     def test_routing_picks_the_longest_matching_root(self):
         cfg = Config()

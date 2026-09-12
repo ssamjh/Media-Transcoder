@@ -15,6 +15,7 @@
     <nav id="tabs">
       <button data-tab="dashboard" class="on">Dashboard</button>
       <button data-tab="libraries">Libraries</button>
+      <button data-tab="modes">Modes</button>
       <button data-tab="files">Files</button>
       <button data-tab="history">History</button>
       <button data-tab="settings">Settings</button>
@@ -61,6 +62,18 @@
       <span class="muted">Each library is scanned and processed with its own settings.</span>
     </div>
     <div id="libraries"></div>
+  </section>
+
+  <!-- MODES -->
+  <section id="tab-modes" hidden>
+    <div class="toolbar">
+      <button id="m-add" class="primary">Add mode</button>
+      <span class="muted">A mode is everything that happens to a file. A
+        library is treated with the mode it names, and an
+        <code>/api/process</code> call can name a different one for that file
+        only.</span>
+    </div>
+    <div id="modes"></div>
   </section>
 
   <!-- FILES -->
@@ -110,14 +123,6 @@
       <button id="s-toml">View file</button>
     </div>
     <div id="settings"></div>
-
-    <h2>Processing modes</h2>
-    <div class="toolbar">
-      <button id="m-add" class="primary">Add mode</button>
-      <span class="muted">A mode overrides a library's profile for a single
-        <code>/api/process</code> call, then is forgotten.</span>
-    </div>
-    <div id="modes"></div>
 
     <h2>Integration</h2>
     <div id="integration" class="card"></div>

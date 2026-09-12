@@ -12,9 +12,9 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app import notify
-from app.config import (Config, ConfigError, LibraryCfg, add_library,
-                        add_mode, apply_library_updates, apply_mode_updates,
-                        loads, dump_toml, resolve_library)
+from app.config import (Config, ConfigError, ModeCfg, add_library,
+                        add_mode, apply_mode_updates, loads, dump_toml,
+                        resolve)
 
 
 class _Recorder(BaseHTTPRequestHandler):
@@ -163,46 +163,45 @@ class TestExpansion(unittest.TestCase):
 
 
 class TestConfigSurface(unittest.TestCase):
-    def test_notifications_are_off_by_default(self):
-        self.assertEqual(notify.hooks_for(LibraryCfg().notify), [])
+    """Hooks belong to a mode, like everything else that happens to a file."""
 
-    def test_a_library_carries_its_own_hooks(self):
-        cfg = Config()
-        lib = add_library(cfg, "Media", ["/media"])
-        apply_library_updates(cfg, lib, {
+    def setUp(self):
+        self.cfg = Config()
+        self.lib = add_library(self.cfg, "Media", ["/media"])
+        self.mode = self.cfg.mode(self.lib.mode)
+
+    def test_notifications_are_off_by_default(self):
+        self.assertEqual(notify.hooks_for(ModeCfg().notify), [])
+
+    def test_a_mode_carries_its_own_hooks(self):
+        apply_mode_updates(self.cfg, self.mode, {
             "notify.enabled": True,
             "notify.urls": ["http://jellyfin:8096/Library/Refresh"],
             "notify.headers": ["X-Api-Key: k"],
         })
-        hooks = notify.hooks_for(lib.notify)
+        hooks = notify.hooks_for(resolve(self.cfg, self.lib).notify)
         self.assertEqual(len(hooks), 1)
         self.assertEqual(hooks[0].headers, {"X-Api-Key": "k"})
 
     def test_a_url_without_a_scheme_is_rejected(self):
-        cfg = Config()
-        lib = add_library(cfg, "Media", ["/media"])
         with self.assertRaises(ConfigError):
-            apply_library_updates(cfg, lib, {
+            apply_mode_updates(self.cfg, self.mode, {
                 "notify.enabled": True, "notify.urls": ["jellyfin:8096/x"]})
 
     def test_a_malformed_header_is_rejected(self):
-        cfg = Config()
-        lib = add_library(cfg, "Media", ["/media"])
         with self.assertRaises(ConfigError):
-            apply_library_updates(cfg, lib,
-                                  {"notify.headers": ["no colon here"]})
+            apply_mode_updates(self.cfg, self.mode,
+                               {"notify.headers": ["no colon here"]})
 
     def test_settings_survive_a_toml_round_trip(self):
-        cfg = Config()
-        add_library(cfg, "Media", ["/media"])
-        apply_library_updates(cfg, cfg.libraries[0], {
+        apply_mode_updates(self.cfg, self.mode, {
             "notify.enabled": True,
             "notify.urls": ["http://jellyfin:8096/Library/Media/Updated"],
             "notify.headers": ["X-Api-Key: k"],
             "notify.method": "PUT",
             "notify.retries": 5,
         })
-        back = loads(dump_toml(cfg)).libraries[0].notify
+        back = loads(dump_toml(self.cfg)).mode(self.mode.id).notify
         self.assertTrue(back.enabled)
         self.assertEqual(back.method, "PUT")
         self.assertEqual(back.retries, 5)
@@ -210,19 +209,20 @@ class TestConfigSurface(unittest.TestCase):
 
 
 class TestModeOverrides(unittest.TestCase):
-    def test_a_mode_can_add_its_own_callback(self):
+    def test_an_import_mode_can_add_its_own_callback(self):
         cfg = Config()
-        add_library(cfg, "Media", ["/media"])
-        mode = add_mode(cfg, "Import", {
+        lib = add_library(cfg, "Media", ["/media"])
+        mode = add_mode(cfg, "Import", copy_from=lib.mode)
+        apply_mode_updates(cfg, mode, {
             "video.enabled": False,
             "notify.enabled": True,
             "notify.urls": ["http://jellyfin:8096/Library/Media/Updated"],
         })
-        profile = resolve_library(cfg, cfg.libraries[0], mode.id)
+        profile = resolve(cfg, lib, mode.id)
         self.assertEqual(len(notify.hooks_for(profile.notify)), 1)
-        # ...and the library itself is untouched, so a scheduled scan of the
-        # same file calls nobody.
-        self.assertEqual(notify.hooks_for(cfg.libraries[0].notify), [])
+        # ...and the mode the library normally runs on is untouched, so a
+        # scheduled scan of the same file calls nobody.
+        self.assertEqual(notify.hooks_for(resolve(cfg, lib).notify), [])
 
     def test_a_bad_mode_url_is_caught_when_the_mode_is_saved(self):
         cfg = Config()

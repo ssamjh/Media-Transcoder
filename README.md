@@ -4,11 +4,13 @@ A self-hosted media library transcoder. It scans your libraries on a schedule,
 works out what each file actually needs, and only then touches it — driven
 from a web panel or the command line.
 
-**Each library has its own processing profile.** TV can be re-encoded to x265
-with subtitles trimmed to English, while Movies is left at its original codec
-and has only its audio cleaned, and Home Video is scanned but never touched.
-Every stage — video, audio, subtitles, container, replacement — has its own
-switch.
+**A library says where files are; a mode says what happens to them.** TV can
+be treated with a mode that re-encodes to x265 and trims subtitles to English,
+while Movies uses one that leaves the video alone and only cleans the audio,
+and Home Video is scanned but never touched. Every stage — video, audio,
+subtitles, container, replacement — has its own switch, and any number of
+libraries can share one mode, so two libraries that should behave the same are
+configured in one place rather than two that drift apart.
 
 - **Python 3.14 on Debian 13**, ffmpeg 7.x, **zero Python dependencies** —
   config is read with the stdlib `tomllib` and the panel is served by
@@ -89,12 +91,20 @@ and ETA, the queue, the last scan's per-library results, and recent history.
 Buttons for *Scan now*, *Queue pending*, *Cancel all*, and a toggle for
 periodic scans.
 
-**Libraries** — one card per library showing its paths, which stages are on,
-and its own counts and reclaimed bytes. *Configure* expands the full profile
-inline; *Scan* scans just that library; the checkbox includes or excludes it
-from scans, and starts unticked on a new library. *Add library* takes a name
+**Libraries** — one card per library showing its paths, the mode it is
+treated with, and its own counts and reclaimed bytes. *Configure* expands its
+routing settings inline — paths, extensions, exclusions, size floor and which
+mode to use; the mode button opens the mode itself, since that is where the
+stages live. *Scan* scans just that library; the checkbox includes or excludes
+it from scans, and starts unticked on a new library. *Add library* takes a name
 and paths — overlapping paths are rejected, since a file under two libraries
 would have an ambiguous profile.
+
+**Modes** — one card per mode: what it does, which libraries run on it, and the
+full set of settings behind *Configure*. Editing one changes every library
+using it, which is the point; the card names them so it is never a surprise.
+*Add mode* starts from a copy of an existing mode, and a mode in use cannot be
+deleted until the libraries on it are pointed elsewhere.
 
 The dashboard shows the stage each job is in: *encoding* with its speed as a
 multiple of realtime, then *copying* with MB/s as the verified file is put back
@@ -110,10 +120,9 @@ what is dropped and why), its state, past runs, and per-file actions —
 **History** — every run: before, after, percentage saved, how long it took.
 
 **Settings** — the global settings, with their documentation, validated on
-save and written back to `config.toml`. Per-library settings live on the
-Libraries tab. Below them, *Processing modes* defines the named overrides the
-API accepts, and *Integration* shows the API key and a ready-made script for
-Sonarr and Radarr.
+save and written back to `config.toml`. What happens to files lives under
+*Modes*, and where they are lives under *Libraries*. *Integration* shows the
+API key and a ready-made script for Sonarr and Radarr.
 
 Every change made in the panel is written straight to `config.toml`.
 
@@ -122,8 +131,9 @@ Every change made in the panel is written straight to `config.toml`.
 ```bash
 docker compose run --rm transcoder libraries
 docker compose run --rm transcoder libraries --add "TV" --path /media/TV
-docker compose run --rm transcoder libraries -L tv --set subtitles.enabled=false
-docker compose run --rm transcoder libraries -L tv --set video.crf_1080p=21
+docker compose run --rm transcoder libraries -L tv --set mode=cleanup
+docker compose run --rm transcoder libraries -L tv --set min_size_mb=200
+docker compose run --rm transcoder modes -m standard --set video.crf_1080p=21
 docker compose run --rm transcoder libraries -L old --remove
 
 docker compose run --rm transcoder scan               # report, touch nothing
@@ -183,38 +193,39 @@ curl -fsS -X POST http://transcoder:8080/api/process \
   -d "{\"path\": \"$sonarr_episodefile_path\", \"mode\": \"cleanup\"}"
 ```
 
-**`mode` picks what actually gets done.** It names a set of overrides on top
-of the owning library's profile:
+**`mode` picks what actually gets done** — the same modes the Modes tab
+defines, naming one for this file instead of whatever its library normally
+uses:
 
 | Mode | What it does |
 | --- | --- |
-| *(omitted)* | The library's own profile, exactly as a scan would. |
-| `all` | The same thing, named explicitly. |
+| *(omitted)* | The mode the file's library uses, exactly as a scan would. |
+| `standard` | Re-encode to x265, best audio plus a stereo downmix, subtitles trimmed, container normalised. |
 | `cleanup` | Everything except re-encoding video — audio and subtitles cleaned, container normalised, every video stream copied. Seconds rather than hours. |
 
-A mode is **one-shot**. It is never stored against the file, so the next
-scheduled scan plans that file under its library's normal profile again. An
-import hook using `cleanup` gets the cheap wins immediately, and the file
-still queues for its x265 encode on the next scan. An unknown mode is a 400,
-not a silent full re-encode.
+Naming a mode is **one-shot**. It is never stored against the file, so the next
+scheduled scan plans that file under its library's own mode again. An import
+hook using `cleanup` gets the cheap wins immediately, and the file still queues
+for its x265 encode on the next scan. An unknown mode is a 400, not a silent
+full re-encode.
 
-Define your own on the Settings tab, or from the command line. Overrides use
-the same dotted keys as a library's settings, and are validated when the mode
-is saved rather than when a hook fires:
+Define your own on the Modes tab, or from the command line. A new mode starts
+as a copy of an existing one, and is validated when it is saved rather than
+when a hook fires:
 
 ```bash
-docker compose run --rm transcoder modes --add "Subs only"
+docker compose run --rm transcoder modes --add "Subs only" --copy-from cleanup
 docker compose run --rm transcoder modes -m subs-only \
-  --set video.enabled=false --set audio.enabled=false
+  --set audio.enabled=false --set video.enabled=false
 ```
 
 ### Telling Jellyfin afterwards
 
 Sonarr calls the transcoder on import; the transcoder calls whoever is next.
-Turn **Notifications** on for a library and list one URL per line:
+Turn **Notifications** on for a mode and list one URL per line:
 
 ```toml
-[libraries.notify]
+[modes.notify]
 enabled = true
 urls = ["http://jellyfin:8096/Library/Media/Updated?api_key=KEY"]
 method = "POST"
@@ -279,7 +290,7 @@ Nothing overwrites a source file until the encode has been verified:
 - the output is re-probed — it must have a video stream, the expected stream
   count, and at least 98% of the source duration, which catches truncated
   encodes that still exit 0
-- the result is discarded unless its size lands inside the library's window,
+- the result is discarded unless its size lands inside the mode's window,
   `output.min_size_ratio` to `output.max_size_ratio` (30%–110% of the source by
   default). The ceiling catches an encode that did not pay off, allowing a
   little room for the stereo track a run may have added; the floor catches one
@@ -327,13 +338,13 @@ The panel is a client of a plain JSON API.
 | GET | `/api/history` | `?limit=&offset=` |
 | GET | `/api/libraries` | each library with its schema and stats |
 | POST | `/api/libraries/add` | `{"name": "TV", "paths": ["/media/TV"]}` |
-| POST | `/api/libraries/update` | `{"id": "tv", "updates": {"video.enabled": false}}` |
+| POST | `/api/libraries/update` | `{"id": "tv", "updates": {"mode": "cleanup"}}` |
 | POST | `/api/libraries/delete` | `{"id": "tv"}` |
 | GET | `/api/config` | global schema, values, rendered TOML |
 | POST | `/api/config` | `{"updates": {"workers.pools": 8}}` |
 | POST | `/api/scan` | `{"library": "tv"}` / `{"paths": [...]}`, both optional |
-| GET | `/api/modes` | each mode with its overrides and schema |
-| POST | `/api/modes/add` | `{"name": "Subs only", "overrides": {...}}` |
+| GET | `/api/modes` | each mode, its schema, and the libraries using it |
+| POST | `/api/modes/add` | `{"name": "Subs only", "copy_from": "cleanup"}` |
 | POST | `/api/modes/update` | `{"id": "cleanup", "updates": {...}}` |
 | POST | `/api/modes/delete` | `{"id": "cleanup"}` |
 | POST | `/api/check` | `{"path": "...", "mode": null}` — plan one file |

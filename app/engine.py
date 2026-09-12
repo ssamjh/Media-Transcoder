@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import ffmpeg, notify
-from .config import Config, ConfigError, LibraryCfg, resolve_library
+from .config import Config, ConfigError, LibraryCfg, Profile, resolve
 from .db import Db
 from .plan import FilePlan, plan_file
 from .probe import ProbeError, probe_file
@@ -173,10 +173,10 @@ class Engine:
                 mode: str | None = None) -> tuple[bool, str]:
         """Queue one file for processing. Returns (queued, message).
 
-        `mode` names a set of overrides from the config, applied to the
-        owning library's profile for this run only. Raises ConfigError if the
-        mode is unknown, so a typo from a Sonarr hook is a loud 400 rather
-        than a silent full re-encode.
+        `mode` names a processing mode to treat this one file with,
+        instead of the mode its library normally uses. Raises ConfigError if
+        the mode is unknown, so a typo from a Sonarr hook is a loud 400
+        rather than a silent full re-encode.
         """
         p = Path(path)
         if not p.exists():
@@ -185,7 +185,7 @@ class Engine:
             lib = self.cfg.library_for(path)
             # Resolve now so an unknown mode or a bad override is rejected
             # while the caller is still listening.
-            resolve_library(self.cfg, lib or LibraryCfg(), mode)
+            resolve(self.cfg, lib or LibraryCfg(), mode)
         with self._lock:
             if path in self._queued:
                 return False, "already queued"
@@ -232,10 +232,10 @@ class Engine:
         if lib is None:
             raise LookupError("no enabled library covers this path")
         probe = probe_file(path)
-        plan = plan_file(probe, lib, self.cfg)
+        plan = plan_file(probe, resolve(self.cfg, lib), self.cfg)
         self._record(Path(path), plan)
         if mode:
-            return plan_file(probe, resolve_library(self.cfg, lib, mode), self.cfg)
+            return plan_file(probe, resolve(self.cfg, lib, mode), self.cfg)
         return plan
 
     # --- internals --------------------------------------------------------
@@ -375,7 +375,7 @@ class Engine:
                                    error=f"probe: {exc}")
                     continue
 
-                plan = plan_file(probe, lib, self.cfg)
+                plan = plan_file(probe, resolve(self.cfg, lib), self.cfg)
                 res.planned.append(plan)
                 if self._record(p, plan) == "skip":
                     res.skipped += 1
@@ -487,7 +487,7 @@ class Engine:
                     self._modes.pop(path, None)
 
     def _copy_back(self, job: ActiveJob, src: Path,
-                   result: ffmpeg.EncodeResult, lib: LibraryCfg) -> bool:
+                   result: ffmpeg.EncodeResult, profile: Profile) -> bool:
         """Put a finished encode onto the library - one file at a time.
 
         The library is typically a network share, and two copies over one
@@ -503,7 +503,7 @@ class Engine:
         job.stage_started = time.time()
         with self._copy_lock:
             job.stage, job.stage_started = "copying", time.time()
-            return ffmpeg.replace_original(src, result, self.cfg, lib,
+            return ffmpeg.replace_original(src, result, self.cfg, profile,
                                            on_progress=copied)
 
     def _process_one(self, path: str) -> str:
@@ -530,19 +530,21 @@ class Engine:
         with self._lock:
             mode = self._modes.pop(path, "")
 
-        # A mode overrides the library's profile for this run only. The plan
-        # that decides the encode is the mode's; the plan that is *stored*
-        # is always the library's own, so a "cleanup" run can never settle a
-        # file as done when the library still wants it re-encoded.
+        # A mode named on the request treats this one file differently. The
+        # plan that decides the encode is that mode's; the plan that is
+        # *stored* is always the library's own mode, so a "cleanup" run can
+        # never settle a file as done when the library still wants it
+        # re-encoded.
         try:
-            profile = resolve_library(self.cfg, lib, mode)
+            profile = resolve(self.cfg, lib, mode)
         except ConfigError as exc:
             self.db.upsert(path, status="failed", error=f"mode: {exc}")
             return "failed"
 
         plan = plan_file(probe, profile, self.cfg)
         if not plan.needs_work:
-            self._record(p, plan_file(probe, lib, self.cfg) if mode else plan)
+            self._record(p, plan_file(probe, resolve(self.cfg, lib), self.cfg)
+                         if mode else plan)
             return "skip"
 
         if self.cfg.dry_run:
@@ -591,7 +593,7 @@ class Engine:
         detail["in_size"] = result.in_size
         detail["out_size"] = result.out_size
 
-        if not lib.output.replace_original:
+        if not profile.output.replace_original:
             note = "replace_original is off for this library, encode discarded"
             ffmpeg.discard(result)
             self.db.upsert(path, status="skip", error=note)
@@ -599,9 +601,9 @@ class Engine:
                                result.elapsed, note, detail)
             return "skip"
 
-        if not self._copy_back(job, p, result, lib):
+        if not self._copy_back(job, p, result, profile):
             note = (ffmpeg.size_verdict(result.in_size, result.out_size,
-                                        lib.output)
+                                        profile.output)
                     or "output was rejected") + ", original kept"
             self.db.upsert(path, status="skip", error=note,
                            in_size=result.in_size, out_size=result.out_size)
@@ -620,7 +622,8 @@ class Engine:
             # profile, so the next scan sees the truth without re-probing: a
             # cleanup run leaves a file still owing an x265 encode.
             try:
-                after = plan_file(probe_file(final), lib, self.cfg)
+                after = plan_file(probe_file(final), resolve(self.cfg, lib),
+                                  self.cfg)
                 status = "done" if not after.needs_work else "pending"
                 reasons = after.reasons
             except ProbeError:

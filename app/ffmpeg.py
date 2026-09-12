@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .config import Config, LibOutputCfg, LibraryCfg
+from .config import Config, LibOutputCfg, Profile
 from .plan import FilePlan
 from .probe import ProbeError, probe_file
 
@@ -289,7 +289,7 @@ def _copy_with_progress(src: Path, dst: Path,
 
 
 def replace_original(src: Path, result: EncodeResult, cfg: Config,
-                     lib: LibraryCfg,
+                     profile: Profile,
                      on_progress: ProgressCb | None = None) -> bool:
     """Move the encode over the original. Returns False if it was rejected.
 
@@ -297,7 +297,7 @@ def replace_original(src: Path, result: EncodeResult, cfg: Config,
     an os.replace on one filesystem - if the process dies mid-copy the
     library still holds a complete file, never a half-written one.
     """
-    if size_verdict(result.in_size, result.out_size, lib.output):
+    if size_verdict(result.in_size, result.out_size, profile.output):
         shutil.rmtree(result.out_path.parent, ignore_errors=True)
         return False
 

@@ -117,6 +117,14 @@ class NotifyCfg:
 
 @dataclass
 class LibraryCfg:
+    """Where files are and which of them count - not what happens to them.
+
+    What happens to a file is a processing mode, named here and defined once
+    in `Config.modes`. Two libraries that should be treated the same point at
+    the same mode instead of carrying two copies of the same settings that
+    drift apart.
+    """
+
     id: str = "media"
     name: str = "Media"
     enabled: bool = True
@@ -128,11 +136,7 @@ class LibraryCfg:
         default_factory=lambda: ["*/.recycle/*", "*/@eaDir/*", "*/.@__thumb/*"]
     )
     min_size_mb: int = 50
-    video: VideoCfg = field(default_factory=VideoCfg)
-    audio: AudioCfg = field(default_factory=AudioCfg)
-    subtitles: SubtitlesCfg = field(default_factory=SubtitlesCfg)
-    output: LibOutputCfg = field(default_factory=LibOutputCfg)
-    notify: NotifyCfg = field(default_factory=NotifyCfg)
+    mode: str = "standard"
 
     def contains(self, path: str) -> str | None:
         """Return the matching root, or None. Used to route a file to a library."""
@@ -150,37 +154,64 @@ class LibraryCfg:
 
 @dataclass
 class ModeCfg:
-    """A named set of overrides applied on top of a library's profile.
+    """A complete, named set of processing settings.
 
-    A mode is a *one-shot* override for a single process request - typically
-    from Sonarr or Radarr on import. It is never stored against the file, so
-    the next scheduled scan plans that file under its library's normal
-    profile again.
-
-    `overrides` uses the same dotted keys as a library's own settings, so
-    {"video.enabled": false} means "do everything except re-encode video".
+    One mode says everything about what a run does to a file: which video it
+    re-encodes, how audio and subtitles are cleaned, what container comes
+    out, and who gets told afterwards. A library names the mode it uses, and
+    a single /api/process call can name a different one for that file only -
+    which is how an import hook does less work than a scheduled scan without
+    a second copy of the settings existing anywhere.
     """
 
-    id: str = "all"
-    name: str = "All"
+    id: str = "standard"
+    name: str = "Standard"
     description: str = ""
-    overrides: dict[str, Any] = field(default_factory=dict)
+    video: VideoCfg = field(default_factory=VideoCfg)
+    audio: AudioCfg = field(default_factory=AudioCfg)
+    subtitles: SubtitlesCfg = field(default_factory=SubtitlesCfg)
+    output: LibOutputCfg = field(default_factory=LibOutputCfg)
+    notify: NotifyCfg = field(default_factory=NotifyCfg)
+
+
+@dataclass
+class Profile:
+    """What one file gets: a library's identity with a mode's settings.
+
+    Planning works from one of these, so nothing downstream needs to know
+    whether the settings came from the library's own mode or from a one-shot
+    override on an import call. `id` and `name` are the library's, because
+    that is what the file's tracked state belongs to.
+    """
+
+    id: str
+    name: str
+    mode: str
+    mode_name: str
+    video: VideoCfg
+    audio: AudioCfg
+    subtitles: SubtitlesCfg
+    output: LibOutputCfg
+    notify: NotifyCfg
 
 
 def default_modes() -> list[ModeCfg]:
+    cleanup = ModeCfg(
+        id="cleanup", name="Cleanup",
+        description="Everything except re-encoding video. Audio and subtitles "
+                    "are cleaned and the container normalised, while every "
+                    "video stream is copied as-is. Fast, and a good fit for "
+                    "an on-import hook.",
+    )
+    cleanup.video.enabled = False
     return [
         ModeCfg(
-            id="all", name="All", overrides={},
-            description="The library's full profile: video, audio, subtitles "
-                        "and container.",
+            id="standard", name="Standard",
+            description="Re-encode to x265, keep the best audio track plus an "
+                        "AAC stereo downmix, keep the configured subtitle "
+                        "languages, normalise the container.",
         ),
-        ModeCfg(
-            id="cleanup", name="Cleanup", overrides={"video.enabled": False},
-            description="Everything except re-encoding video. Audio and "
-                        "subtitles are cleaned and the container normalised, "
-                        "while every video stream is copied as-is. Fast, and "
-                        "a good fit for an on-import hook.",
-        ),
+        cleanup,
     ]
 
 
@@ -271,10 +302,11 @@ SECTIONS: dict[str, str] = {
     "web": "Web panel",
 }
 
-MODE_SECTIONS: dict[str, str] = {"": "Mode"}
+# A library is routing; a mode is everything that happens to a file.
+LIB_SECTIONS: dict[str, str] = {"": "Library"}
 
-LIB_SECTIONS: dict[str, str] = {
-    "": "Library",
+MODE_SECTIONS: dict[str, str] = {
+    "": "Mode",
     "video": "Video",
     "audio": "Audio",
     "subtitles": "Subtitles",
@@ -335,18 +367,6 @@ META: dict[str, dict[str, Any]] = {
 }
 
 
-MODE_META: dict[str, dict[str, Any]] = {
-    "id": {"desc": "Stable identifier, used as \"mode\" in the API call.",
-           "readonly": True},
-    "name": {"desc": "Display name for this mode."},
-    "description": {"desc": "What this mode does, shown in the panel."},
-    "overrides": {
-        "desc": "Library settings this mode overrides, as dotted keys - for "
-                "example video.enabled = false. Anything not listed is taken "
-                "from the library's own profile.",
-        "hint": "One library.setting = value per line"},
-}
-
 LIB_META: dict[str, dict[str, Any]] = {
     "id": {"desc": "Stable identifier. Generated from the name; leave it alone "
                    "once files are tracked against it.", "readonly": True},
@@ -358,6 +378,18 @@ LIB_META: dict[str, dict[str, Any]] = {
                         "are ignored."},
     "min_size_mb": {"desc": "Ignore files smaller than this. Skips samples, "
                             "extras and stray fragments.", "min": 0, "max": 100_000},
+    "mode": {"desc": "Processing mode this library is treated with. Defined "
+                     "under Modes, and shared with any other library that "
+                     "should behave the same way.",
+             "choices": []},
+}
+
+
+MODE_META: dict[str, dict[str, Any]] = {
+    "id": {"desc": "Stable identifier, used as \"mode\" in the API call.",
+           "readonly": True},
+    "name": {"desc": "Display name for this mode."},
+    "description": {"desc": "What this mode does, shown in the panel."},
 
     "video.enabled": {
         "desc": "Re-encode video. Turn off to leave every video stream exactly "
@@ -537,12 +569,21 @@ def schema(cfg: Config) -> list[dict[str, Any]]:
     return out
 
 
-def library_schema(lib: LibraryCfg) -> list[dict[str, Any]]:
-    """Describe one library's settings."""
+def library_schema(lib: LibraryCfg,
+                   cfg: Config | None = None) -> list[dict[str, Any]]:
+    """Describe one library's settings.
+
+    The mode field's choices are whatever modes exist, so the panel offers a
+    picker rather than a free-text id nobody can verify.
+    """
     out = []
     for section, title in LIB_SECTIONS.items():
         holder = lib if section == "" else getattr(lib, section)
         entries = _describe(holder, section, LIB_META)
+        if cfg is not None:
+            for entry in entries:
+                if entry["key"] == "mode":
+                    entry["choices"] = [m.id for m in cfg.modes]
         if entries:
             out.append({"section": section, "title": title, "fields": entries})
     return out
@@ -649,11 +690,37 @@ def apply_updates(cfg: Config, updates: dict[str, Any]) -> list[str]:
     return changed
 
 
+def _transactional(target: Any, apply: Any, validate: Any) -> list[str]:
+    """Apply then validate, restoring the target if validation refuses.
+
+    _apply coerces before it writes, so a bad *value* never lands - but a
+    rule about the whole object (height bands, a size window, a mode that
+    does not exist) can only be checked afterwards, and a half-applied
+    profile would be live for every library pointing at it.
+    """
+    before = copy.deepcopy(target)
+    try:
+        changed = apply()
+        validate()
+    except ConfigError:
+        for f in fields(target):
+            setattr(target, f.name, getattr(before, f.name))
+        raise
+    return changed
+
+
 def apply_library_updates(cfg: Config, lib: LibraryCfg,
                           updates: dict[str, Any]) -> list[str]:
-    changed = _apply(lib, updates, LIB_META)
-    _validate_library(cfg, lib)
-    return changed
+    return _transactional(lib,
+                          lambda: _apply(lib, updates, LIB_META),
+                          lambda: _validate_library(cfg, lib))
+
+
+def apply_mode_updates(cfg: Config, mode: ModeCfg,
+                       updates: dict[str, Any]) -> list[str]:
+    return _transactional(mode,
+                          lambda: _apply(mode, updates, MODE_META),
+                          lambda: _validate_mode(cfg, mode))
 
 
 def _validate_global(cfg: Config) -> None:
@@ -663,10 +730,16 @@ def _validate_global(cfg: Config) -> None:
     mode_ids = [m.id for m in cfg.modes]
     if len(set(mode_ids)) != len(mode_ids):
         raise ConfigError("mode ids must be unique")
+    for lib in cfg.libraries:
+        if cfg.mode(lib.mode) is None:
+            known = ", ".join(mode_ids) or "none"
+            raise ConfigError(
+                f"library {lib.id} names mode {lib.mode!r}, which does not "
+                f"exist (known modes: {known})")
 
 
-def _validate_profile(lib: LibraryCfg) -> None:
-    """The processing rules only. Shared with mode override validation."""
+def _validate_profile(lib: ModeCfg | Profile) -> None:
+    """The processing rules, on a mode or on a resolved profile."""
     v = lib.video
     if not (v.sd_max_height <= v.h720_max_height <= v.h1080_max_height):
         raise ConfigError(
@@ -693,7 +766,10 @@ def _validate_profile(lib: LibraryCfg) -> None:
 
 
 def _validate_library(cfg: Config, lib: LibraryCfg) -> None:
-    _validate_profile(lib)
+    if cfg.mode(lib.mode) is None:
+        known = ", ".join(m.id for m in cfg.modes) or "none"
+        raise ConfigError(
+            f"no such processing mode: {lib.mode} (known modes: {known})")
     if not lib.paths:
         raise ConfigError("a library needs at least one path")
     if not lib.name.strip():
@@ -772,77 +848,37 @@ def remove_library(cfg: Config, lib_id: str) -> LibraryCfg:
 
 # --- modes ------------------------------------------------------------------
 
-# Identity and routing are the library's business, not a mode's. Letting a
-# mode rewrite these would let one API call re-point a library at a different
-# directory.
-MODE_FORBIDDEN = ("id", "name", "enabled", "paths")
-
-
 def _validate_mode(cfg: Config, mode: ModeCfg) -> None:
     if not mode.name.strip():
         raise ConfigError("a mode needs a name")
-    if not isinstance(mode.overrides, dict):
-        raise ConfigError("mode overrides must be a table of dotted keys")
-
-    for key in mode.overrides:
-        if key in MODE_FORBIDDEN:
-            raise ConfigError(f"a mode cannot override {key}")
-
-    # Apply to a throwaway default library: a typo or an out-of-range value is
-    # caught now, when the mode is saved, rather than when Sonarr calls in.
-    probe = LibraryCfg()
-    _apply(probe, dict(mode.overrides), LIB_META)
-    _validate_profile(probe)
-
+    _validate_profile(mode)
     ids = [m.id for m in cfg.modes]
     if len(set(ids)) != len(ids):
         raise ConfigError("mode ids must be unique")
 
 
-def apply_mode_updates(cfg: Config, mode: ModeCfg,
-                       updates: dict[str, Any]) -> list[str]:
-    """Update a mode. `overrides` is replaced wholesale, not merged."""
-    updates = dict(updates)
-    changed: list[str] = []
+def add_mode(cfg: Config, name: str, copy_from: str | None = None) -> ModeCfg:
+    """Create a mode, optionally starting from an existing one.
 
-    if "overrides" in updates:
-        incoming = updates.pop("overrides")
-        if not isinstance(incoming, dict):
-            raise ConfigError("overrides must be an object of dotted keys")
-        before = dict(mode.overrides)
-        probe = LibraryCfg()
-        for key in incoming:
-            if key in MODE_FORBIDDEN:
-                raise ConfigError(f"a mode cannot override {key}")
-        # Coerce through the library schema so "false" becomes False and the
-        # stored overrides are typed the same as the settings they replace.
-        _apply(probe, dict(incoming), LIB_META)
-        _validate_profile(probe)
-        typed = {}
-        for key in incoming:
-            section, _, name = key.rpartition(".")
-            holder = probe if not section else getattr(probe, section)
-            typed[key] = getattr(holder, name)
-        if typed != before:
-            mode.overrides = typed
-            changed.append("overrides")
-
-    changed += _apply(mode, updates, MODE_META)
-    _validate_mode(cfg, mode)
-    return changed
-
-
-def add_mode(cfg: Config, name: str,
-             overrides: dict[str, Any] | None = None) -> ModeCfg:
+    Copying is the usual way in: a new mode is nearly always an existing one
+    with two settings changed, and starting from the defaults would mean
+    re-entering the rest by hand.
+    """
     if not name.strip():
         raise ConfigError("a mode needs a name")
-    mode = ModeCfg(id=slugify(name, {m.id for m in cfg.modes}), name=name.strip())
+    if copy_from:
+        source = cfg.mode(copy_from)
+        if source is None:
+            raise ConfigError(f"no such mode: {copy_from}")
+        mode = copy.deepcopy(source)
+        mode.description = ""
+    else:
+        mode = ModeCfg()
+    mode.id = slugify(name, {m.id for m in cfg.modes})
+    mode.name = name.strip()
     cfg.modes.append(mode)
     try:
-        if overrides:
-            apply_mode_updates(cfg, mode, {"overrides": overrides})
-        else:
-            _validate_mode(cfg, mode)
+        _validate_mode(cfg, mode)
     except ConfigError:
         cfg.modes.remove(mode)
         raise
@@ -853,31 +889,37 @@ def remove_mode(cfg: Config, mode_id: str) -> ModeCfg:
     mode = cfg.mode(mode_id)
     if mode is None:
         raise ConfigError(f"no such mode: {mode_id}")
-    if len(cfg.modes) == 1:
-        raise ConfigError("the last mode cannot be removed")
+    users = [l.name for l in cfg.libraries if l.mode == mode_id]
+    if users:
+        raise ConfigError(
+            f"{mode.name} is in use by {', '.join(users)} - point "
+            f"{'them' if len(users) > 1 else 'it'} at another mode first")
     cfg.modes.remove(mode)
     return mode
 
 
-def resolve_library(cfg: Config, lib: LibraryCfg,
-                    mode_id: str | None) -> LibraryCfg:
-    """The profile to plan with: the library, or a copy under a mode.
+def resolve(cfg: Config, lib: LibraryCfg,
+            mode_id: str | None = None) -> Profile:
+    """The profile to plan a file with.
 
-    The returned library is a detached copy, so nothing a mode changes leaks
-    back into the live config or into any other file being processed.
+    `mode_id` is the one-shot override an import hook passes; without one a
+    file is treated with its library's own mode. The settings are deep
+    copied, so nothing that happens to one file can leak into the live config
+    or into another file being processed at the same time.
     """
-    if not mode_id:
-        return lib
-    mode = cfg.mode(mode_id)
+    mode = cfg.mode(mode_id or lib.mode)
     if mode is None:
         known = ", ".join(m.id for m in cfg.modes) or "none"
-        raise ConfigError(f"no such mode: {mode_id} (known modes: {known})")
-    if not mode.overrides:
-        return lib
-    derived = copy.deepcopy(lib)
-    _apply(derived, dict(mode.overrides), LIB_META)
-    _validate_profile(derived)
-    return derived
+        raise ConfigError(
+            f"no such mode: {mode_id or lib.mode} (known modes: {known})")
+    return Profile(
+        id=lib.id, name=lib.name, mode=mode.id, mode_name=mode.name,
+        video=copy.deepcopy(mode.video),
+        audio=copy.deepcopy(mode.audio),
+        subtitles=copy.deepcopy(mode.subtitles),
+        output=copy.deepcopy(mode.output),
+        notify=copy.deepcopy(mode.notify),
+    )
 
 
 # --- TOML round-trip --------------------------------------------------------
@@ -970,21 +1012,28 @@ def dump_toml(cfg: Config) -> str:
         out.append("# " + "-" * 70)
         out.append("# Processing modes")
         out.append("#")
-        out.append("# A mode is a one-shot override for a single /api/process")
-        out.append("# call - typically from Sonarr or Radarr on import. It is")
-        out.append("# not remembered against the file, so the next scheduled")
-        out.append("# scan plans it under its library's normal profile again.")
+        out.append("# A mode is everything that happens to a file. A library")
+        out.append("# names the mode it is treated with, and a single")
+        out.append("# /api/process call can name a different one for that")
+        out.append("# file only - which is how an import hook does less work")
+        out.append("# than a scheduled scan without a second copy of these")
+        out.append("# settings existing anywhere.")
         out.append("# " + "-" * 70)
         for mode in cfg.modes:
-            out.append("[[modes]]")
-            for entry in mode_schema(mode)[0]["fields"]:
-                if entry["desc"]:
-                    _wrap_comment(entry["desc"], out)
-                out.append(f"{entry['name']} = {_fmt(entry['value'])}")
-                out.append("")
-            while out and out[-1] == "":
-                out.pop()
             out.append("")
+            for block in mode_schema(mode):
+                if block["section"] == "":
+                    out.append("[[modes]]")
+                else:
+                    out.append(f"[modes.{block['section']}]")
+                for entry in block["fields"]:
+                    if entry["desc"]:
+                        _wrap_comment(entry["desc"], out)
+                    out.append(f"{entry['name']} = {_fmt(entry['value'])}")
+                    out.append("")
+                while out and out[-1] == "":
+                    out.pop()
+                out.append("")
 
     return "\n".join(out).rstrip() + "\n"
 
@@ -1031,6 +1080,63 @@ def _migrate_library(raw: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+PROFILE_SECTIONS = ("video", "audio", "subtitles", "output", "notify")
+
+
+def _migrate_settings(raw: dict[str, Any]) -> dict[str, Any]:
+    """Translate settings that were renamed, so old files still load.
+
+    _fill rejects unknown keys, which is what catches typos - so a renamed
+    setting has to be handled here or every existing config.toml would fail
+    to load on upgrade.
+    """
+    out = dict(raw)
+    output = dict(out.get("output") or {})
+    if "only_replace_if_smaller" in output:
+        # Became a size window. True was "it must shrink", false was "accept
+        # whatever comes out"; neither said anything about a floor, so the
+        # floor stays off for a config that predates it.
+        must_shrink = bool(output.pop("only_replace_if_smaller"))
+        output.setdefault("max_size_ratio", 1.0 if must_shrink else 10.0)
+        output.setdefault("min_size_ratio", 0.0)
+        out["output"] = output
+    return out
+
+
+def _split_library(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Separate a pre-modes library into its routing and its settings.
+
+    Libraries used to carry a full profile of their own. Those settings are
+    now a mode, so they are lifted out here and the library is left pointing
+    at one.
+    """
+    routing = {k: v for k, v in raw.items() if k not in PROFILE_SECTIONS}
+    profile = {k: v for k, v in raw.items() if k in PROFILE_SECTIONS}
+    return routing, _migrate_settings(profile)
+
+
+def _mode_for(cfg: Config, settings: dict[str, Any], name: str,
+              description: str = "") -> str:
+    """Find or create a mode matching these settings, and return its id.
+
+    Two libraries configured identically - the common case - end up sharing
+    one mode rather than getting a copy each, which is the whole point of
+    the change.
+    """
+    candidate = ModeCfg()
+    _fill(candidate, settings, "")
+    for existing in cfg.modes:
+        same = all(getattr(existing, sec) == getattr(candidate, sec)
+                   for sec in PROFILE_SECTIONS)
+        if same:
+            return existing.id
+    candidate.id = slugify(name, {m.id for m in cfg.modes})
+    candidate.name = name
+    candidate.description = description
+    cfg.modes.append(candidate)
+    return candidate.id
+
+
 def _from_dict(data: dict[str, Any]) -> Config:
     cfg = Config()
     data = dict(data)
@@ -1039,23 +1145,40 @@ def _from_dict(data: dict[str, Any]) -> Config:
 
     _fill(cfg, data, "")
 
-    if raw_libs is not None:
-        cfg.libraries = []
-        for i, raw in enumerate(raw_libs):
-            lib = LibraryCfg()
-            _fill(lib, _migrate_library(raw), f"libraries[{i}].")
-            if not raw.get("id"):
-                lib.id = slugify(lib.name, {l.id for l in cfg.libraries})
-            cfg.libraries.append(lib)
-
     if raw_modes is not None:
         cfg.modes = []
         for i, raw in enumerate(raw_modes):
+            raw = dict(raw)
+            # Modes used to be a set of dotted overrides on top of a library's
+            # profile. They are the profile now, so an old one is read as the
+            # default settings with its overrides applied.
+            overrides = raw.pop("overrides", None)
             mode = ModeCfg()
-            _fill(mode, raw, f"modes[{i}].")
+            _fill(mode, _migrate_settings(raw), f"modes[{i}].")
+            if overrides:
+                _apply(mode, dict(overrides), MODE_META)
             if not raw.get("id"):
                 mode.id = slugify(mode.name, {m.id for m in cfg.modes})
             cfg.modes.append(mode)
+
+    if raw_libs is not None:
+        cfg.libraries = []
+        for i, raw in enumerate(raw_libs):
+            routing, profile = _split_library(raw)
+            lib = LibraryCfg()
+            _fill(lib, routing, f"libraries[{i}].")
+            if not routing.get("id"):
+                lib.id = slugify(lib.name, {l.id for l in cfg.libraries})
+            if profile:
+                # Pre-modes library: its own settings become a mode, shared
+                # with any other library configured identically.
+                lib.mode = _mode_for(
+                    cfg, profile, lib.name,
+                    f"Migrated from the {lib.name} library's own settings.")
+            elif "mode" not in routing and cfg.mode(lib.mode) is None:
+                # No settings and no mode named: it ran on the defaults.
+                lib.mode = _mode_for(cfg, {}, "Standard")
+            cfg.libraries.append(lib)
 
     _validate_global(cfg)
     return cfg

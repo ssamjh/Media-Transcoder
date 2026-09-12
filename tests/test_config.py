@@ -19,14 +19,23 @@ from app.config import Config, ConfigError          # noqa: E402
 
 
 def one_library(path: str = "/media/A", name: str = "Media") -> Config:
-    """A config with a single, enabled library.
+    """A config with a single, enabled library on a mode of its own.
 
-    Config() itself has none, and add_library() creates them switched off,
-    so both steps are explicit here - as they are in the panel.
+    Config() itself has no libraries, and add_library() creates them switched
+    off and pointing at the shared Standard mode - so both steps are explicit
+    here, as they are in the panel. Giving it a private mode keeps these
+    tests from changing what every other library would do.
     """
     c = Config()
-    cfgmod.add_library(c, name, [path]).enabled = True
+    lib = cfgmod.add_library(c, name, [path])
+    lib.enabled = True
+    lib.mode = cfgmod.add_mode(c, f"{name} mode", copy_from="standard").id
     return c
+
+
+def mode_of(c: Config, lib_id: str = "media"):
+    """The mode a library is treated with."""
+    return c.mode(c.library(lib_id).mode)
 
 
 def three_libraries() -> Config:
@@ -47,25 +56,30 @@ class TestRoundTrip(unittest.TestCase):
         c = three_libraries()
         self.assertEqual(cfgmod.loads(cfgmod.dump_toml(c)), c)
 
-    def test_divergent_library_profiles_survive(self):
+    def test_divergent_modes_survive(self):
         c = three_libraries()
-        cfgmod.apply_library_updates(c, c.library("tv"), {
-            "video.crf_1080p": 19, "subtitles.enabled": False,
-            "audio.keep_best_only": False,
-        })
-        cfgmod.apply_library_updates(c, c.library("movies"), {
-            "video.enabled": False, "output.container": "keep",
-            "audio.stereo_bitrate": "192k",
-        })
-        cfgmod.apply_library_updates(c, c.library("home-video"), {
-            "enabled": False, "audio.enabled": False,
-            "output.replace_original": False,
-        })
+        for lib_id, updates in [
+            ("tv", {"video.crf_1080p": 19, "subtitles.enabled": False,
+                    "audio.keep_best_only": False}),
+            ("movies", {"video.enabled": False, "output.container": "keep",
+                        "audio.stereo_bitrate": "192k"}),
+            ("home-video", {"audio.enabled": False,
+                            "output.replace_original": False}),
+        ]:
+            lib = c.library(lib_id)
+            # Each library gets a mode of its own to diverge in.
+            lib.mode = cfgmod.add_mode(c, f"{lib.name} mode",
+                                       copy_from="standard").id
+            cfgmod.apply_mode_updates(c, c.mode(lib.mode), updates)
+        cfgmod.apply_library_updates(c, c.library("home-video"),
+                                     {"enabled": False})
+
         back = cfgmod.loads(cfgmod.dump_toml(c))
         self.assertEqual(back, c)
-        self.assertFalse(back.library("movies").video.enabled)
-        self.assertFalse(back.library("tv").subtitles.enabled)
-        self.assertEqual(back.library("movies").output.container, "keep")
+        self.assertFalse(mode_of(back, "movies").video.enabled)
+        self.assertFalse(mode_of(back, "tv").subtitles.enabled)
+        self.assertEqual(mode_of(back, "movies").output.container, "keep")
+        self.assertFalse(back.library("home-video").enabled)
 
     def test_modified_global_values_survive(self):
         c = Config()
@@ -77,43 +91,47 @@ class TestRoundTrip(unittest.TestCase):
 
     def test_awkward_strings_survive(self):
         c = one_library()
-        lib = c.libraries[0]
-        cfgmod.apply_library_updates(c, lib, {
+        mode = mode_of(c)
+        cfgmod.apply_mode_updates(c, mode, {
             "audio.commentary_pattern": r'commentary|"quoted"|back\slash',
             "audio.stereo_title": 'He said "hi"',
-            "name": "Films & \"Shorts\"",
         })
+        cfgmod.apply_library_updates(c, c.libraries[0],
+                                     {"name": "Films & \"Shorts\""})
         back = cfgmod.loads(cfgmod.dump_toml(c))
-        self.assertEqual(back.libraries[0].audio.commentary_pattern,
-                         lib.audio.commentary_pattern)
-        self.assertEqual(back.libraries[0].audio.stereo_title,
-                         lib.audio.stereo_title)
-        self.assertEqual(back.libraries[0].name, lib.name)
+        self.assertEqual(mode_of(back).audio.commentary_pattern,
+                         mode.audio.commentary_pattern)
+        self.assertEqual(mode_of(back).audio.stereo_title,
+                         mode.audio.stereo_title)
+        self.assertEqual(back.libraries[0].name, c.libraries[0].name)
 
     def test_dict_fields_survive(self):
         c = one_library()
-        cfgmod.apply_library_updates(c, c.libraries[0],
-                                     {"audio.channel_score": {"6": 40, "2": 10}})
+        cfgmod.apply_mode_updates(c, mode_of(c),
+                                  {"audio.channel_score": {"6": 40, "2": 10}})
         back = cfgmod.loads(cfgmod.dump_toml(c))
-        self.assertEqual(back.libraries[0].audio.channel_score, {"6": 40, "2": 10})
+        self.assertEqual(mode_of(back).audio.channel_score, {"6": 40, "2": 10})
 
     def test_empty_string_entry_is_preserved(self):
         """"" means "no language tag" in undefined_languages."""
         c = one_library()
-        self.assertIn("", c.libraries[0].subtitles.undefined_languages)
+        self.assertIn("", mode_of(c).subtitles.undefined_languages)
         back = cfgmod.loads(cfgmod.dump_toml(c))
-        self.assertIn("", back.libraries[0].subtitles.undefined_languages)
+        self.assertIn("", mode_of(back).subtitles.undefined_languages)
 
     def test_save_and_load_from_disk(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "config.toml"
             c = three_libraries()
-            cfgmod.apply_library_updates(c, c.library("movies"),
-                                         {"video.crf_720p": 25})
+            movies = c.library("movies")
+            movies.mode = cfgmod.add_mode(c, "Movies mode",
+                                          copy_from="standard").id
+            cfgmod.apply_mode_updates(c, c.mode(movies.mode),
+                                      {"video.crf_720p": 25})
             cfgmod.save(c, p)
             loaded = cfgmod.load(p)
             self.assertEqual(loaded, c)
-            self.assertEqual(loaded.library("movies").video.crf_720p, 25)
+            self.assertEqual(mode_of(loaded, "movies").video.crf_720p, 25)
 
     def test_generated_file_carries_its_documentation(self):
         text = cfgmod.dump_toml(one_library())
@@ -142,12 +160,16 @@ class TestLibraries(unittest.TestCase):
         self.assertNotIn(lib, c.active_libraries)
         self.assertIsNone(c.library_for("/media/New/a.mkv"))
 
-    def test_new_library_starts_from_defaults(self):
+    def test_new_library_starts_on_the_standard_mode(self):
+        """It carries no settings of its own: it names a mode instead."""
         c = one_library()
         lib = cfgmod.add_library(c, "New", ["/media/New"])
-        self.assertTrue(lib.video.enabled)
-        self.assertEqual(lib.video.crf_1080p, 22)
-        self.assertEqual(lib.subtitles.keep_languages, ["eng", "en", "english"])
+        self.assertEqual(lib.mode, "standard")
+        profile = cfgmod.resolve(c, lib)
+        self.assertTrue(profile.video.enabled)
+        self.assertEqual(profile.video.crf_1080p, 22)
+        self.assertEqual(profile.subtitles.keep_languages,
+                         ["eng", "en", "english"])
 
     def test_rejects_overlapping_paths(self):
         c = one_library("/media/TV")
@@ -212,23 +234,25 @@ paths = ["/media/TV"]
 [libraries.output]
 """
 
-    def load(self, body: str) -> Config:
-        return cfgmod.loads(self.HEAD + body)
+    def load(self, body: str):
+        """The mode that the migrated library ends up being treated with."""
+        cfg = cfgmod.loads(self.HEAD + body)
+        return cfg.mode(cfg.libraries[0].mode)
 
     def test_only_replace_if_smaller_true_becomes_a_ceiling_of_one(self):
-        out = self.load("only_replace_if_smaller = true").libraries[0].output
+        out = self.load("only_replace_if_smaller = true").output
         self.assertEqual(out.max_size_ratio, 1.0)
         self.assertEqual(out.min_size_ratio, 0.0)   # it never had a floor
 
     def test_only_replace_if_smaller_false_lifts_the_ceiling(self):
-        out = self.load("only_replace_if_smaller = false").libraries[0].output
+        out = self.load("only_replace_if_smaller = false").output
         self.assertEqual(out.max_size_ratio, 10.0)
 
     def test_an_explicit_new_setting_wins_over_the_old_one(self):
         out = self.load("""
 only_replace_if_smaller = true
 max_size_ratio = 1.5
-""").libraries[0].output
+""").output
         self.assertEqual(out.max_size_ratio, 1.5)
 
     def test_a_genuinely_unknown_key_is_still_an_error(self):
@@ -240,75 +264,77 @@ class TestValidation(unittest.TestCase):
     def setUp(self):
         self.c = one_library()
         self.lib = self.c.libraries[0]
+        self.mode = mode_of(self.c)
+
+    def set_mode(self, updates):
+        return cfgmod.apply_mode_updates(self.c, self.mode, updates)
 
     def test_rejects_unknown_key(self):
         with self.assertRaises(ConfigError):
             cfgmod.apply_updates(self.c, {"workers.nope": 1})
         with self.assertRaises(ConfigError):
-            cfgmod.apply_library_updates(self.c, self.lib, {"video.nope": 1})
+            self.set_mode({"video.nope": 1})
 
     def test_rejects_out_of_range(self):
         for key, value in [("web.port", 0), ("workers.count", 0),
                            ("schedule.scan_interval_hours", 0)]:
             with self.assertRaises(ConfigError, msg=key):
                 cfgmod.apply_updates(Config(), {key: value})
-        for key, value in [("video.crf_1080p", 99), ("video.crf_1080p", -1),
-                           ("min_size_mb", -5)]:
+        for key, value in [("video.crf_1080p", 99), ("video.crf_1080p", -1)]:
             c = one_library()
             with self.assertRaises(ConfigError, msg=key):
-                cfgmod.apply_library_updates(c, c.libraries[0], {key: value})
+                cfgmod.apply_mode_updates(c, mode_of(c), {key: value})
+        c = one_library()
+        with self.assertRaises(ConfigError):
+            cfgmod.apply_library_updates(c, c.libraries[0], {"min_size_mb": -5})
 
     def test_rejects_bad_choice(self):
         with self.assertRaises(ConfigError):
-            cfgmod.apply_library_updates(self.c, self.lib, {"video.preset": "turbo"})
+            self.set_mode({"video.preset": "turbo"})
         with self.assertRaises(ConfigError):
-            cfgmod.apply_library_updates(self.c, self.lib,
-                                         {"output.container": "avi"})
+            self.set_mode({"output.container": "avi"})
 
     def test_rejects_non_numeric(self):
         with self.assertRaises(ConfigError):
-            cfgmod.apply_library_updates(self.c, self.lib,
-                                         {"video.crf_1080p": "high"})
+            self.set_mode({"video.crf_1080p": "high"})
 
     def test_rejects_a_size_window_that_accepts_nothing(self):
         with self.assertRaises(ConfigError):
-            cfgmod.apply_library_updates(self.c, self.lib, {
-                "output.min_size_ratio": 0.9, "output.max_size_ratio": 0.5})
+            self.set_mode({"output.min_size_ratio": 0.9,
+                           "output.max_size_ratio": 0.5})
 
     def test_rejects_inconsistent_height_bands(self):
         with self.assertRaises(ConfigError):
-            cfgmod.apply_library_updates(self.c, self.lib,
-                                         {"video.sd_max_height": 2000})
+            self.set_mode({"video.sd_max_height": 2000})
 
     def test_rejects_empty_library_paths(self):
         with self.assertRaises(ConfigError):
             cfgmod.apply_library_updates(self.c, self.lib, {"paths": []})
 
     def test_nothing_is_applied_when_one_field_fails(self):
-        before = self.lib.video.crf_720p
+        before = self.mode.video.crf_720p
         with self.assertRaises(ConfigError):
-            cfgmod.apply_library_updates(self.c, self.lib, {
-                "video.crf_720p": 18, "video.crf_1080p": 999,
-            })
-        self.assertEqual(self.lib.video.crf_720p, before)
+            self.set_mode({"video.crf_720p": 18, "video.crf_1080p": 999})
+        self.assertEqual(self.mode.video.crf_720p, before)
 
     def test_coerces_strings_from_form_fields(self):
-        changed = cfgmod.apply_library_updates(self.c, self.lib, {
+        changed = self.set_mode({
             "video.crf_1080p": "20",
             "subtitles.drop_image_subs": "true",
             "video.enabled": "false",
-            "paths": "/a, /b",
         })
+        changed += cfgmod.apply_library_updates(self.c, self.lib,
+                                                {"paths": "/a, /b"})
         self.assertEqual(len(changed), 4)
-        self.assertEqual(self.lib.video.crf_1080p, 20)
-        self.assertIs(self.lib.subtitles.drop_image_subs, True)
-        self.assertIs(self.lib.video.enabled, False)
+        self.assertEqual(self.mode.video.crf_1080p, 20)
+        self.assertIs(self.mode.subtitles.drop_image_subs, True)
+        self.assertIs(self.mode.video.enabled, False)
         self.assertEqual(self.lib.paths, ["/a", "/b"])
 
     def test_unchanged_values_are_not_reported_as_changed(self):
         self.assertEqual(
             cfgmod.apply_library_updates(self.c, self.lib,
-                                         {"video.preset": "medium"}), [])
+                                         {"name": self.lib.name}), [])
 
 
 class TestSchema(unittest.TestCase):
@@ -335,13 +361,18 @@ class TestSchema(unittest.TestCase):
         self.assertEqual(g["workers.count"], "int")
         self.assertEqual(g["output.min_duration_ratio"], "float")
 
-        lib = cfgmod.LibraryCfg()
-        l = {f["key"]: f["type"] for block in cfgmod.library_schema(lib)
+        l = {f["key"]: f["type"] for block in
+             cfgmod.library_schema(cfgmod.LibraryCfg())
              for f in block["fields"]}
         self.assertEqual(l["paths"], "list")
-        self.assertEqual(l["audio.channel_score"], "map")
-        self.assertEqual(l["video.preset"], "str")
-        self.assertEqual(l["video.enabled"], "bool")
+        self.assertEqual(l["min_size_mb"], "int")
+
+        m = {f["key"]: f["type"] for block in
+             cfgmod.mode_schema(cfgmod.ModeCfg())
+             for f in block["fields"]}
+        self.assertEqual(m["audio.channel_score"], "map")
+        self.assertEqual(m["video.preset"], "str")
+        self.assertEqual(m["video.enabled"], "bool")
 
     def test_library_id_is_marked_read_only(self):
         lib = cfgmod.LibraryCfg()
@@ -350,11 +381,21 @@ class TestSchema(unittest.TestCase):
         self.assertTrue(entry["readonly"])
 
     def test_each_stage_exposes_an_enabled_switch(self):
-        lib = cfgmod.LibraryCfg()
-        keys = {f["key"] for block in cfgmod.library_schema(lib)
+        keys = {f["key"] for block in cfgmod.mode_schema(cfgmod.ModeCfg())
                 for f in block["fields"]}
         for key in ("video.enabled", "audio.enabled", "subtitles.enabled"):
             self.assertIn(key, keys)
+
+    def test_every_mode_field_is_described(self):
+        missing = [f["key"] for block in cfgmod.mode_schema(cfgmod.ModeCfg())
+                   for f in block["fields"] if not f["desc"]]
+        self.assertEqual(missing, [], f"undocumented settings: {missing}")
+
+    def test_the_mode_field_offers_the_modes_that_exist(self):
+        cfg = one_library()
+        entry = next(f for block in cfgmod.library_schema(cfg.libraries[0], cfg)
+                     for f in block["fields"] if f["key"] == "mode")
+        self.assertEqual(entry["choices"], [m.id for m in cfg.modes])
 
 
 if __name__ == "__main__":

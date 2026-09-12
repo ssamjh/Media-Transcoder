@@ -11,6 +11,7 @@ internet.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import secrets
@@ -50,6 +51,17 @@ def _norm(raw: Any) -> str:
     if not raw:
         raise ApiError("path is required")
     return str(Path(str(raw)))
+
+
+def _stages(mode: Any) -> dict[str, bool]:
+    """The one-line summary of what a mode does, for a card in the panel."""
+    return {
+        "video": mode.video.enabled,
+        "audio": mode.audio.enabled,
+        "subtitles": mode.subtitles.enabled,
+        "replace": mode.output.replace_original,
+        "notify": mode.notify.enabled and bool(mode.notify.urls),
+    }
 
 
 def _row(r: Any) -> dict[str, Any]:
@@ -426,28 +438,26 @@ class Handler(BaseHTTPRequestHandler):
         return lib
 
     def api_libraries(self) -> dict[str, Any]:
+        cfg = self.engine.cfg
         stats = self.engine.db.library_stats()
-        return {
-            "libraries": [
-                {
-                    "id": l.id,
-                    "name": l.name,
-                    "enabled": l.enabled,
-                    "paths": l.paths,
-                    "stages": {
-                        "video": l.video.enabled,
-                        "audio": l.audio.enabled,
-                        "subtitles": l.subtitles.enabled,
-                        "replace": l.output.replace_original,
-                        "notify": l.notify.enabled and bool(l.notify.urls),
-                    },
-                    "schema": config_mod.library_schema(l),
-                    "stats": stats.get(l.id, {"total": 0, "bytes": 0,
-                                              "counts": {}, "saved": 0}),
-                }
-                for l in self.engine.cfg.libraries
-            ],
-        }
+        out = []
+        for l in cfg.libraries:
+            mode = cfg.mode(l.mode)
+            out.append({
+                "id": l.id,
+                "name": l.name,
+                "enabled": l.enabled,
+                "paths": l.paths,
+                "mode": l.mode,
+                "mode_name": mode.name if mode else l.mode,
+                # What this library actually does is its mode's business, so
+                # the summary on the card is read from there.
+                "stages": _stages(mode) if mode else {},
+                "schema": config_mod.library_schema(l, cfg),
+                "stats": stats.get(l.id, {"total": 0, "bytes": 0,
+                                          "counts": {}, "saved": 0}),
+            })
+        return {"libraries": out}
 
     def api_library_add(self, body: dict[str, Any]) -> dict[str, Any]:
         name = str(body.get("name") or "").strip()
@@ -503,17 +513,18 @@ class Handler(BaseHTTPRequestHandler):
                     "id": m.id,
                     "name": m.name,
                     "description": m.description,
-                    "overrides": dict(m.overrides),
+                    "stages": _stages(m),
+                    # Which libraries run on this mode: the panel needs it to
+                    # say what a change is about to affect, and deleting one
+                    # that is in use is refused.
+                    "libraries": [
+                        {"id": l.id, "name": l.name}
+                        for l in cfg.libraries if l.mode == m.id
+                    ],
                     "schema": config_mod.mode_schema(m),
                 }
                 for m in cfg.modes
             ],
-            "library_keys": sorted(
-                f["key"] for block in config_mod.library_schema(
-                    cfg.libraries[0] if cfg.libraries else config_mod.LibraryCfg())
-                for f in block["fields"]
-                if f["key"] not in config_mod.MODE_FORBIDDEN
-            ),
         }
 
     def _mode_cfg(self, mode_id: Any) -> Any:
@@ -524,31 +535,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_mode_add(self, body: dict[str, Any]) -> dict[str, Any]:
         name = str(body.get("name") or "").strip()
-        overrides = body.get("overrides") or {}
-        if not isinstance(overrides, dict):
-            raise ApiError("overrides must be an object of dotted keys")
+        copy_from = body.get("copy_from")
         try:
-            mode = config_mod.add_mode(self.engine.cfg, name, overrides)
+            mode = config_mod.add_mode(self.engine.cfg, name,
+                                       str(copy_from) if copy_from else None)
         except ConfigError as exc:
             raise ApiError(str(exc)) from None
         self._persist()
-        return {"ok": True, "id": mode.id, "message": f"added {mode.name}"}
+        return {"ok": True, "id": mode.id, "message": f"added {mode.name}",
+                **self.api_modes()}
 
     def api_mode_update(self, body: dict[str, Any]) -> dict[str, Any]:
         mode = self._mode_cfg(body.get("id"))
         updates = body.get("updates")
         if not isinstance(updates, dict):
             raise ApiError("updates must be an object")
-        before = (mode.name, mode.description, dict(mode.overrides))
+        before = copy.deepcopy(mode)
         try:
             changed = config_mod.apply_mode_updates(self.engine.cfg, mode, updates)
         except ConfigError as exc:
-            mode.name, mode.description, mode.overrides = before
+            # Put the mode back exactly as it was: a half-applied profile
+            # would be live for every library pointing at it.
+            self.engine.cfg.modes[self.engine.cfg.modes.index(mode)] = before
             raise ApiError(str(exc)) from None
         self._persist()
         return {"ok": True, "changed": changed,
                 "message": f"updated {len(changed)} setting(s)" if changed
-                           else "no changes"}
+                           else "no changes",
+                **self.api_modes()}
 
     def api_mode_delete(self, body: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -556,7 +570,7 @@ class Handler(BaseHTTPRequestHandler):
         except ConfigError as exc:
             raise ApiError(str(exc)) from None
         self._persist()
-        return {"ok": True, "message": f"removed {mode.name}"}
+        return {"ok": True, "message": f"removed {mode.name}", **self.api_modes()}
 
     def api_notify_test(self, body: dict[str, Any]) -> dict[str, Any]:
         """Fire a library's webhooks now, with a sample payload.
@@ -567,7 +581,7 @@ class Handler(BaseHTTPRequestHandler):
         lib = self._library(body.get("library") or body.get("id"))
         mode = self._mode(body)
         try:
-            profile = config_mod.resolve_library(self.engine.cfg, lib, mode)
+            profile = config_mod.resolve(self.engine.cfg, lib, mode)
         except ConfigError as exc:
             raise ApiError(str(exc)) from None
         hooks = notify_mod.hooks_for(profile.notify)

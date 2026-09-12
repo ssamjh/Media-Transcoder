@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import Config, LibraryCfg
+from .config import Config, Profile
 from .probe import (
     Probe, channels_of, codec_of, is_attached_pic, is_default, lang_of, title_of,
 )
@@ -47,6 +47,8 @@ class FilePlan:
     path: str
     library: str = ""
     library_name: str = ""
+    mode: str = ""
+    mode_name: str = ""
     container: str = "mkv"
     streams: list[StreamPlan] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
@@ -85,6 +87,8 @@ class FilePlan:
             "path": self.path,
             "library": self.library,
             "library_name": self.library_name,
+            "mode": self.mode,
+            "mode_name": self.mode_name,
             "container": self.container,
             "needs_work": self.needs_work,
             "skip_reason": self.skip_reason,
@@ -114,7 +118,7 @@ class FilePlan:
         }
 
 
-def _band(height: int, lib: LibraryCfg) -> str:
+def _band(height: int, lib: Profile) -> str:
     v = lib.video
     if height > v.skip_above_height:
         return "over"
@@ -127,7 +131,7 @@ def _band(height: int, lib: LibraryCfg) -> str:
     return "over"
 
 
-def _plan_video(probe: Probe, lib: LibraryCfg, cfg: Config,
+def _plan_video(probe: Probe, lib: Profile, cfg: Config,
                 plan: FilePlan) -> bool:
     """Fills in the video stream. Returns False if the file should be skipped."""
     v, out = lib.video, lib.output
@@ -203,7 +207,7 @@ def _plan_video(probe: Probe, lib: LibraryCfg, cfg: Config,
     return True
 
 
-def _plan_audio(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
+def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
     a = lib.audio
     audio = probe.of_type("audio")
     if not audio:
@@ -364,7 +368,7 @@ SUBTITLE_FALLBACK = "srt"
 
 
 def _subtitle_codec(s: dict[str, Any], container: str,
-                    lib: LibraryCfg) -> str | None:
+                    lib: Profile) -> str | None:
     """"copy", a codec to convert to, or None if the track cannot travel.
 
     Only containers with a known support list are judged; anything else is
@@ -379,7 +383,7 @@ def _subtitle_codec(s: dict[str, Any], container: str,
     return SUBTITLE_FALLBACK
 
 
-def _add_subtitle(s: dict[str, Any], lib: LibraryCfg, plan: FilePlan) -> None:
+def _add_subtitle(s: dict[str, Any], lib: Profile, plan: FilePlan) -> None:
     """Copy, convert or drop one subtitle track for the target container."""
     codec = _subtitle_codec(s, plan.container, lib)
     if codec is None:
@@ -394,7 +398,7 @@ def _add_subtitle(s: dict[str, Any], lib: LibraryCfg, plan: FilePlan) -> None:
                                    note=lang_of(s)))
 
 
-def _plan_subtitles(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
+def _plan_subtitles(probe: Probe, lib: Profile, plan: FilePlan) -> None:
     sub = lib.subtitles
     subs = probe.of_type("subtitle")
     if not subs:
@@ -434,10 +438,11 @@ def _plan_subtitles(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
         _add_subtitle(s, lib, plan)
 
 
-def plan_file(probe: Probe, lib: LibraryCfg, cfg: Config) -> FilePlan:
+def plan_file(probe: Probe, lib: Profile, cfg: Config) -> FilePlan:
     source_ext = Path(probe.path).suffix.lower().lstrip(".")
     plan = FilePlan(
         path=probe.path, library=lib.id, library_name=lib.name,
+        mode=lib.mode, mode_name=lib.mode_name,
         duration=probe.duration, size=probe.size,
         container=source_ext if lib.output.container == "keep"
         else lib.output.container,

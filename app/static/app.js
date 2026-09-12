@@ -83,7 +83,7 @@ const sel = (scope, key) => `[data-key="${CSS.escape(scope + key)}"]`;
 
 /* ---------- tabs ---------- */
 
-const TABS = ["dashboard", "libraries", "files", "history", "settings"];
+const TABS = ["dashboard", "libraries", "modes", "files", "history", "settings"];
 let current = "dashboard";
 
 function show(tab) {
@@ -93,7 +93,8 @@ function show(tab) {
   document.querySelectorAll("#tabs button").forEach((b) =>
     b.classList.toggle("on", b.dataset.tab === tab));
   if (location.hash.slice(1) !== tab) location.hash = tab;
-  if (tab === "libraries") loadLibraries();
+  if (tab === "libraries") { loadLibraries(); loadModes(); }
+  if (tab === "modes") loadModes();
   if (tab === "files") loadFiles();
   if (tab === "history") loadHistory();
   if (tab === "settings") loadSettings();
@@ -358,6 +359,8 @@ function renderLibraries() {
       </div>
       <div class="lib-paths">${lib.paths.map(esc).join("<br>")}</div>
       <div class="stage-row">
+        <button class="small" data-lib-mode="${esc(lib.mode)}"
+          title="Edit this mode">${esc(lib.mode_name || lib.mode)}</button>
         <span class="stage ${s.video ? "on" : "off"}">re-encode video</span>
         <span class="stage ${s.audio ? "on" : "off"}">clean audio</span>
         <span class="stage ${s.subtitles ? "on" : "off"}">clean subtitles</span>
@@ -398,6 +401,15 @@ function wireLibraries() {
       const id = b.dataset.libEdit;
       if (libOpen.has(id)) libOpen.delete(id); else libOpen.add(id);
       renderLibraries();
+    }));
+
+  // The stages on a library card belong to its mode, so send people there
+  // to change them rather than duplicating the editor.
+  root.querySelectorAll("[data-lib-mode]").forEach((b) =>
+    b.addEventListener("click", () => {
+      modeOpen.clear();
+      modeOpen.add(b.dataset.libMode);
+      show("modes");
     }));
 
   root.querySelectorAll("[data-lib-scan]").forEach((b) =>
@@ -441,7 +453,7 @@ function wireLibraries() {
         const res = await act("/api/libraries/update",
           { id: lib.id, updates: Object.fromEntries(d) },
           `Saved ${d.size} setting${d.size > 1 ? "s" : ""}`);
-        if (res) { libraries = res.libraries; renderLibraries(); }
+        if (res) { libraries = res.libraries; renderLibraries(); loadModes(); }
       });
     refreshLibDirty(lib);
   });
@@ -824,17 +836,19 @@ el("s-toml").addEventListener("click", () => {
 /* ---------- modes ---------- */
 
 let modes = [];
-let libraryKeys = [];
 const modeOpen = new Set();
 
 function renderModes() {
   el("modes").innerHTML = modes.map((m) => {
     const open = modeOpen.has(m.id);
-    const keys = Object.keys(m.overrides);
-    const summary = keys.length
-      ? keys.map((k) => `<span class="stage off">${esc(k)} = ${
-          esc(String(m.overrides[k]))}</span>`).join("")
-      : '<span class="stage on">the library profile, unchanged</span>';
+    const s = m.stages || {};
+    const users = m.libraries || [];
+    const summary = `
+      <span class="stage ${s.video ? "on" : "off"}">re-encode video</span>
+      <span class="stage ${s.audio ? "on" : "off"}">clean audio</span>
+      <span class="stage ${s.subtitles ? "on" : "off"}">clean subtitles</span>
+      <span class="stage ${s.replace ? "on" : "off"}">replace originals</span>
+      <span class="stage ${s.notify ? "on" : "off"}">notify on finish</span>`;
     return `<div class="lib" data-mode="${esc(m.id)}">
       <div class="lib-head">
         <span class="nm">${esc(m.name)}</span>
@@ -846,6 +860,10 @@ function renderModes() {
       </div>
       ${m.description ? `<div class="lib-paths">${esc(m.description)}</div>` : ""}
       <div class="stage-row">${summary}</div>
+      <div class="lib-stats">${users.length
+        ? users.map((l) => `<span class="tag info">${esc(l.name)}</span>`).join("")
+          + '<span class="tag">use this mode</span>'
+        : '<span class="tag">no library uses this mode</span>'}</div>
       ${open ? `<div class="lib-body">
         <div class="toolbar" style="padding:13px 16px 0;margin:0">
           <button class="primary small" data-mode-save="${esc(m.id)}" disabled>Save changes</button>
@@ -853,11 +871,6 @@ function renderModes() {
           <span class="muted" data-mode-note="${esc(m.id)}"></span>
         </div>
         ${sectionsHtml(m.schema, "mode:" + m.id + ":")}
-        <div class="sect">
-          <h3>Available keys</h3>
-          <div class="field"><div class="desc">${
-            libraryKeys.map((k) => `<code>${esc(k)}</code>`).join(" ")}</div></div>
-        </div>
       </div>` : ""}
     </div>`;
   }).join("") || '<div class="card"><div class="empty">No modes defined</div></div>';
@@ -890,6 +903,11 @@ function wireModes() {
     b.addEventListener("click", async () => {
       const m = modes.find((x) => x.id === b.dataset.modeDel);
       if (!m) return;
+      const users = (m.libraries || []).map((l) => l.name);
+      if (users.length) {
+        toast(`${m.name} is in use by ${users.join(", ")}`, true);
+        return;
+      }
       if (!confirm(`Delete the "${m.name}" mode? Files are not touched.`)) return;
       if (await act("/api/modes/delete", { id: m.id })) loadModes();
     }));
@@ -908,7 +926,7 @@ function wireModes() {
         if (!d.size) return;
         const res = await act("/api/modes/update",
           { id: m.id, updates: Object.fromEntries(d) });
-        if (res) loadModes();
+        if (res) { loadModes(); if (libraries.length) loadLibraries(); }
       });
   });
 }
@@ -917,7 +935,6 @@ async function loadModes() {
   try {
     const d = await api("/api/modes");
     modes = d.modes;
-    libraryKeys = d.library_keys || [];
     renderModes();
     renderIntegration();
   } catch (e) {
@@ -935,27 +952,25 @@ el("m-add").addEventListener("click", () => {
         <div class="ctl"><input type="text" id="nm-name" placeholder="Cleanup"></div>
       </div>
       <div class="field">
-        <div><label>Overrides</label><div class="desc">Library settings this
-          mode replaces, one per line.</div></div>
-        <div class="ctl"><textarea id="nm-ov" rows="4" spellcheck="false"
-          placeholder="video.enabled = false"></textarea>
-          <span class="hint">One library.setting = value per line</span></div>
+        <div><label>Start from</label><div class="desc">A new mode is usually
+          an existing one with a couple of settings changed.</div></div>
+        <div class="ctl"><select id="nm-copy">${
+          modes.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`)
+            .join("")}<option value="">The built-in defaults</option></select></div>
       </div>
     </div>
     <div class="toolbar"><button class="primary" id="nm-go">Add mode</button></div>`);
 
   el("nm-go").addEventListener("click", async () => {
-    const overrides = {};
-    for (const line of el("nm-ov").value.split(String.fromCharCode(10))) {
-      const t = line.trim();
-      if (!t) continue;
-      const i = t.indexOf("=");
-      if (i < 0) continue;
-      overrides[t.slice(0, i).trim()] = t.slice(i + 1).trim();
-    }
     const d = await act("/api/modes/add",
-      { name: el("nm-name").value, overrides });
-    if (d) { closeDrawer(); loadModes(); }
+      { name: el("nm-name").value, copy_from: el("nm-copy").value || null });
+    if (d) {
+      modes = d.modes;
+      modeOpen.add(d.id);
+      closeDrawer();
+      show("modes");
+      renderModes();
+    }
   });
 });
 

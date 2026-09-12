@@ -97,51 +97,61 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
 - `cli.py` — argparse subcommands sharing the same `Engine`. `scan`/`check`/`libraries`
   support `--json`.
 
-### Per-library profiles
+### Libraries and modes
 
-Settings that decide *what happens to a file* live on the library (`LibraryCfg`), not
-globally. Nothing is inherited — a library's full behaviour is readable in one place. Each of
-video / audio / subtitles / output has its own `enabled` switch, and a disabled stage copies
-its streams through untouched. `Config.library_for(path)` routes a file by longest matching
-root; overlapping library paths are rejected at config-validation time precisely because a
-file under two libraries would have an ambiguous profile.
+The split is the whole design: a **library** says where files are and which of them count
+(`paths`, `extensions`, `exclude`, `min_size_mb`, `enabled`); a **mode** (`ModeCfg`) says
+what happens to them — video / audio / subtitles / output / notify, each stage with its own
+`enabled` switch, and a disabled stage copies its streams through untouched. A library names
+one mode; two libraries that should behave the same point at the same mode rather than
+carrying two copies of the settings that drift apart.
 
-There is no default library and no minimum. A fresh `Config()` has none, every library can
-be deleted, and anything that needs a library to render — mode schemas, say — falls back to
-a throwaway `LibraryCfg()` instead of assuming `libraries[0]` exists.
+`resolve(cfg, lib, mode_id=None)` returns a `Profile`: the library's `id` and `name` with a
+**deepcopy** of a mode's settings. `plan_file` takes that, never a `LibraryCfg`, so nothing
+downstream knows whether the settings came from the library's own mode or a one-shot
+override — and nothing a file's run does can leak into the live config or another file's
+profile. `mode_id` is the override an import call passes; without one, the library's own
+mode is used.
 
-Notifications are part of the library profile (`LibraryCfg.notify`) for the same reason
-everything else is: whether Jellyfin should be told about a file is a property of the
-library, and being an ordinary dotted key means a **mode can override it** — an import
-hook adds a callback that scheduled scans do not make. `engine._process_one` fires them
-from `profile.notify` (the mode-resolved copy), and only on the success path after
+`Config.library_for(path)` routes a file by longest matching root; overlapping library paths
+are rejected at config-validation time precisely because a file under two libraries would
+have an ambiguous profile. There is no default library and no minimum — a fresh `Config()`
+has none and every library can be deleted — but there are always modes, and
+`_validate_global` rejects a library naming one that does not exist.
+
+Notifications are part of the mode (`ModeCfg.notify`) for the same reason everything else
+is: whether Jellyfin should be told about a file is part of what happens to it, so an import
+mode can add a callback that scheduled scans do not make. `engine._process_one` fires them
+from `profile.notify` (the resolved copy), and only on the success path after
 `replace_original`.
 
 Global config (`workers`, `schedule`, `output.temp_dir`, `web`) is about *how the daemon
 runs*, not about what a file becomes.
 
-### Modes
+### One-shot modes
 
-A `ModeCfg` is a named set of dotted overrides (`{"video.enabled": false}`) applied on top of
-a library's profile for **one** `/api/process` call — the endpoint Sonarr and Radarr hit on
-import. `resolve_library(cfg, lib, mode_id)` returns a **deepcopy** with the overrides
-applied; never mutate the live `LibraryCfg`, or one file's request would change every other
-file's profile.
+`/api/process` — the endpoint Sonarr and Radarr hit on import — takes an optional `mode`,
+applied to that one file instead of its library's. Two invariants make the one-shot
+semantics real, both in `engine._process_one`:
 
-Two invariants make the one-shot semantics real, both in `engine._process_one`:
+1. The named mode decides the **encode**, but the state written to the database is always
+   the library's own verdict. After a mode run the result is re-planned under
+   `resolve(cfg, lib)`, so a `cleanup` file lands as `pending` with its x265 work still
+   owed. Storing the mode's verdict would settle it as `done`/`skip` and `db.is_cached`
+   would stop the next scan re-probing it — the file would silently never get encoded.
+2. The requested mode lives in `engine._modes`, keyed by path, popped when the file is
+   processed or cancelled. Deliberately not persisted: a restart drops it, which is the same
+   outcome as the scan that follows.
 
-1. The mode decides the **encode**, but the state written to the database is always the
-   library's own verdict. After a mode run the result is re-planned under `lib` (not
-   `profile`), so a `cleanup` file lands as `pending` with its x265 work still owed. Storing
-   the mode's verdict would settle it as `done`/`skip` and `db.is_cached` would stop the next
-   scan re-probing it — the file would silently never get encoded.
-2. Modes live in `engine._modes`, keyed by path, popped when the file is processed or
-   cancelled. Deliberately not persisted: a restart drops them, which is the same outcome as
-   the scan that follows.
+A mode is validated when it is *saved*, so a typo is caught in the panel rather than at 3am
+when a hook fires, and `apply_mode_updates` is transactional (`_transactional` restores the
+mode if validation refuses) because a half-applied profile would be live for every library
+pointing at it.
 
-Overrides are validated against a throwaway `LibraryCfg` when the mode is *saved*, so a typo
-is caught in the panel rather than at 3am when a hook fires. `MODE_FORBIDDEN` blocks
-overriding identity and routing (`id`, `name`, `enabled`, `paths`).
+Config files from before this split still load: `_from_dict` lifts a library's own
+`[libraries.video]`-style settings into a mode (sharing one mode between libraries
+configured identically), and turns an old override-style mode into a full one by applying
+its `overrides` to the defaults.
 
 ### API key
 
