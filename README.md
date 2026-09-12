@@ -27,7 +27,7 @@ Each is independently switchable per library.
 | --- | --- | --- |
 | **Video** | 720p → x265 CRF 23, 1080p → CRF 22. Already-HEVC is copied, never re-encoded. SD (≤576p) cleaned but not re-encoded. Above 1200p left alone entirely. | Every video stream copied untouched, and the height ceiling no longer applies — a 4K file still gets its audio and subtitles cleaned. |
 | **Audio** | Keeps the best track — preferred language, not commentary, sane channel layout, widely supported codec — plus an AAC 2.0 downmix as default, titled `Stereo` (`audio.stereo_title`) whether it was encoded or adopted. An existing stereo track is re-used, not rebuilt. `keep_best_only` and `add_stereo_downmix` are separate switches. | Every audio track copied untouched, dispositions left alone. |
-| **Subtitles** | Keeps configured languages only. If none match and there is exactly one *unlabelled* track, that one is kept. | Every subtitle track copied untouched. |
+| **Subtitles** | Keeps configured languages only. If none match and there is exactly one *unlabelled* track, that one is kept. A text track the target container cannot carry — `mov_text` from an MP4, say — is converted to SubRip rather than copied, since Matroska refuses it at the muxer. | Every subtitle track copied, converted to SubRip if the container demands it. |
 | **Output** | Container normalised to MKV (or `keep` to leave the extension alone), cover art dropped, originals replaced once verified and inside the size window (30%–110% of the source by default). | — |
 | **Notifications** | Once the verified file is back in place, calls the URLs you list — Jellyfin, Plex, anything with an HTTP endpoint. Queued and delivered in the background. | Nothing is called. |
 

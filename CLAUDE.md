@@ -57,7 +57,11 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
 
 - `probe.py` — thin ffprobe wrapper plus stream accessors (`lang_of`, `codec_of`, …). The
   `Probe` dataclass is just `path + streams + fmt`, which is why tests can fabricate one.
-- `plan.py` — **pure**: `plan_file(probe, lib, cfg) -> FilePlan`. No I/O, no side effects.
+- `plan.py` — **pure**: `plan_file(probe, lib, cfg) -> FilePlan`. A stream copy is not
+  always free: `CONTAINER_SUBTITLES` says what the target container can mux, and a text
+  track it cannot (`mov_text` into mkv) is converted to `srt` rather than copied — the
+  muxer would otherwise refuse the header and fail the entire encode. Applies even with
+  the subtitle stage off, because that is a muxing fact, not a policy. No I/O, no side effects.
   A `FilePlan` is a list of `StreamPlan`s (source index → output codec + extra args) plus
   `reasons` (human-readable work items) and `dropped`. `needs_work` is `skip_reason is None
   and bool(reasons)`, so an empty `reasons` list is the idempotency signal.

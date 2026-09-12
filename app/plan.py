@@ -350,6 +350,50 @@ def _plan_audio(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
     plan.reasons.append(f"add {a.stereo_encoder} stereo downmix")
 
 
+# What each container can actually mux. ffmpeg refuses to write the header for
+# anything else and the whole encode dies at the muxer, so a stream copy is not
+# always free: MP4 carries mov_text, Matroska does not.
+CONTAINER_SUBTITLES: dict[str, set[str]] = {
+    "mkv": {
+        "subrip", "srt", "ass", "ssa", "webvtt",
+        "hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvdsub",
+        "dvb_subtitle", "xsub",
+    },
+}
+SUBTITLE_FALLBACK = "srt"
+
+
+def _subtitle_codec(s: dict[str, Any], container: str,
+                    lib: LibraryCfg) -> str | None:
+    """"copy", a codec to convert to, or None if the track cannot travel.
+
+    Only containers with a known support list are judged; anything else is
+    copied as before, which is what "keep" the source container means.
+    """
+    supported = CONTAINER_SUBTITLES.get(container)
+    codec = codec_of(s)
+    if supported is None or codec in supported:
+        return "copy"
+    if codec in lib.subtitles.image_codecs:
+        return None                     # a picture cannot become text
+    return SUBTITLE_FALLBACK
+
+
+def _add_subtitle(s: dict[str, Any], lib: LibraryCfg, plan: FilePlan) -> None:
+    """Copy, convert or drop one subtitle track for the target container."""
+    codec = _subtitle_codec(s, plan.container, lib)
+    if codec is None:
+        plan.dropped.append(f"subtitle {codec_of(s)} {lang_of(s)}")
+        plan.reasons.append(
+            f"drop {codec_of(s)} subtitle, {plan.container} cannot carry it")
+        return
+    if codec != "copy":
+        plan.reasons.append(
+            f"convert {codec_of(s)} subtitle to {codec} for {plan.container}")
+    plan.streams.append(StreamPlan(s["index"], "subtitle", codec,
+                                   note=lang_of(s)))
+
+
 def _plan_subtitles(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
     sub = lib.subtitles
     subs = probe.of_type("subtitle")
@@ -357,11 +401,10 @@ def _plan_subtitles(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
         return
 
     if not sub.enabled:
+        # "Untouched" still has to come out of the muxer intact: which tracks
+        # are kept is policy, but whether the container can hold them is not.
         for s in subs:
-            plan.streams.append(
-                StreamPlan(s["index"], "subtitle", "copy",
-                           note="subtitles untouched")
-            )
+            _add_subtitle(s, lib, plan)
         return
 
     keep = [s for s in subs if lang_of(s, "") in sub.keep_languages]
@@ -388,8 +431,7 @@ def _plan_subtitles(probe: Probe, lib: LibraryCfg, plan: FilePlan) -> None:
             plan.reasons.append("drop unwanted subtitle")
 
     for s in keep:
-        plan.streams.append(StreamPlan(s["index"], "subtitle", "copy",
-                                       note=lang_of(s)))
+        _add_subtitle(s, lib, plan)
 
 
 def plan_file(probe: Probe, lib: LibraryCfg, cfg: Config) -> FilePlan:

@@ -308,6 +308,55 @@ class TestAudio(Base):
         self.assertEqual(audio[0].src_index, 1)
 
 
+class TestSubtitleContainers(Base):
+    """Not every subtitle codec survives a copy into every container.
+
+    MP4 carries mov_text and Matroska does not, so copying one into an .mkv
+    fails at the muxer - taking the whole encode with it.
+    """
+
+    def test_mov_text_is_converted_for_mkv(self):
+        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
+                       S(2, "eng", codec="mov_text")],
+                      path="/media/TV/a.mp4")
+        track = self.kinds(p, "subtitle")[0]
+        self.assertEqual(track.codec, "srt")
+        self.assertIn("convert mov_text subtitle to srt for mkv", p.reasons)
+
+    def test_a_codec_mkv_supports_is_still_copied(self):
+        for codec in ("subrip", "ass", "webvtt", "hdmv_pgs_subtitle"):
+            p = self.plan([V(0, "hevc"),
+                           A(1, "aac", 2, "eng", title="Stereo", default=1),
+                           S(2, "eng", codec=codec)])
+            self.assertEqual(self.kinds(p, "subtitle")[0].codec, "copy", codec)
+
+    def test_an_image_track_mkv_cannot_hold_is_dropped_not_converted(self):
+        """A picture cannot become text, so the only options are drop or fail."""
+        self.lib.subtitles.image_codecs = ["mov_text_pictures"]
+        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
+                       S(2, "eng", codec="mov_text_pictures")])
+        self.assertEqual(self.kinds(p, "subtitle"), [])
+        self.assertIn("drop mov_text_pictures subtitle, mkv cannot carry it",
+                      p.reasons)
+
+    def test_keeping_the_source_container_copies_as_before(self):
+        self.lib.output.container = "keep"
+        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
+                       S(2, "eng", codec="mov_text")],
+                      path="/media/TV/a.mp4")
+        self.assertEqual(self.kinds(p, "subtitle")[0].codec, "copy")
+
+    def test_disabled_subtitles_still_respect_the_container(self):
+        """Which tracks are kept is policy; whether they can be muxed is not."""
+        self.lib.subtitles.enabled = False
+        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
+                       S(2, "fre", codec="mov_text"), S(3, "jpn", codec="mov_text")],
+                      path="/media/TV/a.mp4")
+        subs = self.kinds(p, "subtitle")
+        self.assertEqual(len(subs), 2)                 # none dropped
+        self.assertTrue(all(t.codec == "srt" for t in subs))
+
+
 class TestIdempotency(Base):
     """A file this tool produced must never be picked up again."""
 
@@ -319,6 +368,15 @@ class TestIdempotency(Base):
             S(3, "eng"),
         ])
         self.assertFalse(p.needs_work, f"unexpected work: {p.reasons}")
+
+    def test_a_converted_subtitle_is_not_converted_again(self):
+        """The srt this run writes must read back as nothing left to do."""
+        before = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
+                            S(2, "eng", codec="mov_text")], path="/media/TV/a.mp4")
+        self.assertTrue(before.needs_work)
+        after = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
+                           S(2, "eng", codec="subrip")], path="/media/TV/a.mkv")
+        self.assertFalse(after.needs_work, f"unexpected work: {after.reasons}")
 
     def test_stable_across_repeated_planning(self):
         streams = [
