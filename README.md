@@ -29,6 +29,7 @@ Each is independently switchable per library.
 | **Audio** | Keeps the best track — preferred language, not commentary, sane channel layout, widely supported codec — plus an AAC 2.0 downmix as default. An existing stereo track is re-used, not rebuilt. `keep_best_only` and `add_stereo_downmix` are separate switches. | Every audio track copied untouched, dispositions left alone. |
 | **Subtitles** | Keeps configured languages only. If none match and there is exactly one *unlabelled* track, that one is kept. | Every subtitle track copied untouched. |
 | **Output** | Container normalised to MKV (or `keep` to leave the extension alone), cover art dropped, originals replaced once verified. | — |
+| **Notifications** | Once the verified file is back in place, calls the URLs you list — Jellyfin, Plex, anything with an HTTP endpoint. Queued and delivered in the background. | Nothing is called. |
 
 Chapters and metadata are always preserved.
 
@@ -182,6 +183,57 @@ docker compose run --rm transcoder modes -m subs-only \
   --set video.enabled=false --set audio.enabled=false
 ```
 
+### Telling Jellyfin afterwards
+
+Sonarr calls the transcoder on import; the transcoder calls whoever is next.
+Turn **Notifications** on for a library and list one URL per line:
+
+```toml
+[libraries.notify]
+enabled = true
+urls = ["http://jellyfin:8096/Library/Media/Updated?api_key=KEY"]
+method = "POST"
+headers = ["X-Api-Key: KEY"]
+timeout = 15.0
+retries = 3
+```
+
+The calls fire **only after** a processed file has been verified and copied
+back over the original — never for a file that needed no work, and never for
+one that failed. `POST` and `PUT` carry the details as a JSON body:
+
+```json
+{"event": "processed", "status": "done", "path": "/media/TV/Show/ep.mkv",
+ "name": "ep.mkv", "stem": "ep", "dir": "/media/TV/Show",
+ "original_path": "/media/TV/Show/ep.avi", "library": "tv", "mode": "cleanup",
+ "in_size": 8203471290, "out_size": 3011225533, "saved": 5192245757,
+ "elapsed": 1794.2, "reasons": ["..."], "at": 1757635200.0}
+```
+
+`GET`, `HEAD` and `DELETE` send no body, so put what the far end needs in the
+URL: `{path}` `{name}` `{stem}` `{dir}` `{library}` `{mode}` `{status}` are
+substituted and URL-encoded, in the URL and in header values alike.
+
+Everything is queued on one background thread, so a bulk import that finishes
+twenty files at once queues sixty calls and drains them without holding up a
+single encode. Timeouts, connection errors and 5xx are retried with a growing
+delay; a 4xx is not, because it will not start working. **Delivery is best
+effort**: a webhook that never succeeds is logged and dropped. The file on
+disk is already correct, and the transcoder's state must not depend on
+somebody else answering.
+
+A **mode** can override all of this for one request, since `notify.*` are
+ordinary library keys — so an import hook can add a callback that scheduled
+scans do not make:
+
+```bash
+docker compose run --rm transcoder modes --add "Import"
+docker compose run --rm transcoder modes -m import   --set video.enabled=false   --set notify.enabled=true   --set notify.urls=http://jellyfin:8096/Library/Media/Updated?api_key=KEY
+```
+
+*Test hooks* on the Libraries tab fires a sample payload at the configured
+URLs so a typo shows up while you are looking at the panel, not at 3am.
+
 ### The API key
 
 One is generated on first start, written to `config.toml`, and shown on the
@@ -256,6 +308,7 @@ The panel is a client of a plain JSON API.
 | POST | `/api/queue-pending` | queue everything that needs work |
 | POST | `/api/retry` | reset failures, optionally `{"path": "..."}` |
 | POST | `/api/schedule` | `{"enabled": true}` |
+| POST | `/api/notify/test` | `{"library": "tv", "mode": null}` — fire a sample webhook |
 | POST | `/api/history/clear` | wipe history, keep file state |
 
 ## Development

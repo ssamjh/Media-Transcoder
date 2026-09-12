@@ -92,6 +92,24 @@ class LibOutputCfg:
 
 
 @dataclass
+class NotifyCfg:
+    """Webhooks fired once a processed file has been copied back.
+
+    Part of the library profile rather than global config, because whether
+    Jellyfin should be told about a file is a property of the library the
+    file is in - and because a mode can then override it for one request,
+    which is how an import hook adds its own callback.
+    """
+
+    enabled: bool = False
+    urls: list[str] = field(default_factory=list)
+    method: str = "POST"
+    headers: list[str] = field(default_factory=list)
+    timeout: float = 15.0
+    retries: int = 3
+
+
+@dataclass
 class LibraryCfg:
     id: str = "media"
     name: str = "Media"
@@ -108,6 +126,7 @@ class LibraryCfg:
     audio: AudioCfg = field(default_factory=AudioCfg)
     subtitles: SubtitlesCfg = field(default_factory=SubtitlesCfg)
     output: LibOutputCfg = field(default_factory=LibOutputCfg)
+    notify: NotifyCfg = field(default_factory=NotifyCfg)
 
     def contains(self, path: str) -> str | None:
         """Return the matching root, or None. Used to route a file to a library."""
@@ -243,6 +262,7 @@ LIB_SECTIONS: dict[str, str] = {
     "audio": "Audio",
     "subtitles": "Subtitles",
     "output": "Output",
+    "notify": "Notifications",
 }
 
 META: dict[str, dict[str, Any]] = {
@@ -394,6 +414,37 @@ LIB_META: dict[str, dict[str, Any]] = {
                 "testing settings against real files."},
     "output.only_replace_if_smaller": {
         "desc": "Throw the encode away if it came out bigger than the source."},
+
+    "notify.enabled": {
+        "desc": "Call other applications once a processed file has been "
+                "copied back over the original. Nothing is called for a file "
+                "that needed no work, or for one that failed."},
+    "notify.urls": {
+        "desc": "URLs to call, one per file, in order. {path} {name} {stem} "
+                "{dir} {library} {mode} {status} are substituted and URL "
+                "encoded - for example "
+                "http://jellyfin:8096/Library/Media/Updated?api_key=KEY. "
+                "Calls are queued and delivered in the background, so a slow "
+                "or dead service never holds up an encode.",
+        "hint": "One URL per line"},
+    "notify.method": {
+        "desc": "HTTP method. POST and PUT send the file's details as a JSON "
+                "body; GET, HEAD and DELETE send no body, so put everything "
+                "the far end needs in the URL.",
+        "choices": ["POST", "PUT", "GET", "HEAD", "DELETE"]},
+    "notify.headers": {
+        "desc": "Extra request headers, one \"Name: value\" per line. The "
+                "same {tokens} are substituted here, so an API key header is "
+                "written literally: X-Api-Key: abc123.",
+        "hint": "One Name: value per line"},
+    "notify.timeout": {
+        "desc": "Seconds to wait for each call.", "min": 0.5, "max": 300},
+    "notify.retries": {
+        "desc": "Attempts per URL. A timeout, a connection error or a 5xx is "
+                "retried with a growing delay; a 4xx is not, because it will "
+                "not start working. Delivery is best effort - a webhook that "
+                "never succeeds is logged and dropped, never re-runs the "
+                "encode.", "min": 1, "max": 10},
 }
 
 
@@ -592,6 +643,16 @@ def _validate_profile(lib: LibraryCfg) -> None:
             "video height bands must increase: sd_max_height <= "
             "h720_max_height <= h1080_max_height"
         )
+
+    for url in lib.notify.urls:
+        if not str(url).strip().lower().startswith(("http://", "https://")):
+            raise ConfigError(
+                f"notify.urls: {url!r} must start with http:// or https://")
+    for line in lib.notify.headers:
+        name, sep, _ = str(line).partition(":")
+        if not sep or not name.strip():
+            raise ConfigError(
+                f"notify.headers: {line!r} must be in the form \"Name: value\"")
 
 
 def _validate_library(cfg: Config, lib: LibraryCfg) -> None:

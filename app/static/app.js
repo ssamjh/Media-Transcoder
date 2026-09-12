@@ -329,6 +329,7 @@ function renderLibraries() {
         <span class="tag">${esc(lib.id)}</span>
         <div class="grow"></div>
         <button class="small" data-lib-scan="${esc(lib.id)}">Scan</button>
+        ${s.notify ? `<button class="small" data-lib-notify="${esc(lib.id)}">Test hooks</button>` : ""}
         <button class="small" data-lib-edit="${esc(lib.id)}">${
           open ? "Close" : "Configure"}</button>
         <button class="small danger" data-lib-del="${esc(lib.id)}">Delete</button>
@@ -339,6 +340,7 @@ function renderLibraries() {
         <span class="stage ${s.audio ? "on" : "off"}">clean audio</span>
         <span class="stage ${s.subtitles ? "on" : "off"}">clean subtitles</span>
         <span class="stage ${s.replace ? "on" : "off"}">replace originals</span>
+        <span class="stage ${s.notify ? "on" : "off"}">notify on finish</span>
       </div>
       <div class="lib-stats">
         <span class="tag">${st.total} tracked</span>
@@ -386,6 +388,11 @@ function wireLibraries() {
   root.querySelectorAll("[data-lib-scan]").forEach((b) =>
     b.addEventListener("click", () =>
       act("/api/scan", { library: b.dataset.libScan }, "Scan requested")));
+
+  root.querySelectorAll("[data-lib-notify]").forEach((b) =>
+    b.addEventListener("click", () =>
+      act("/api/notify/test", { library: b.dataset.libNotify },
+          "Test calls queued")));
 
   root.querySelectorAll("[data-lib-on]").forEach((n) =>
     n.addEventListener("change", async () => {

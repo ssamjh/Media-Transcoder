@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import config as config_mod
+from . import notify as notify_mod
 from .config import Config, ConfigError
 from .db import loads as json_loads
 from .engine import MAX_ATTEMPTS, Engine
@@ -180,6 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/modes/add": self.api_mode_add,
                 "/api/modes/update": self.api_mode_update,
                 "/api/modes/delete": self.api_mode_delete,
+                "/api/notify/test": self.api_notify_test,
             }.get(route)
             if handler is None:
                 raise ApiError("not found", 404)
@@ -243,6 +245,11 @@ class Handler(BaseHTTPRequestHandler):
                 for l in eng.cfg.libraries
             ],
             "queue_depth": len(queued),
+            "notify": {
+                "pending": eng.notifier.depth,
+                "sent": eng.notifier.sent,
+                "failed": eng.notifier.failed,
+            },
             "queued": [{"path": p, "name": Path(p).name} for p in queued[:20]],
             "active": active,
             "recent": [_row(r) for r in recent],
@@ -423,6 +430,7 @@ class Handler(BaseHTTPRequestHandler):
                         "audio": l.audio.enabled,
                         "subtitles": l.subtitles.enabled,
                         "replace": l.output.replace_original,
+                        "notify": l.notify.enabled and bool(l.notify.urls),
                     },
                     "schema": config_mod.library_schema(l),
                     "stats": stats.get(l.id, {"total": 0, "bytes": 0,
@@ -539,6 +547,33 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(str(exc)) from None
         self._persist()
         return {"ok": True, "message": f"removed {mode.name}"}
+
+    def api_notify_test(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Fire a library's webhooks now, with a sample payload.
+
+        Worth having: a typo in a Jellyfin URL should show up while someone is
+        looking at the panel, not silently at 3am when an import fires.
+        """
+        lib = self._library(body.get("library") or body.get("id"))
+        mode = self._mode(body)
+        try:
+            profile = config_mod.resolve_library(self.engine.cfg, lib, mode)
+        except ConfigError as exc:
+            raise ApiError(str(exc)) from None
+        hooks = notify_mod.hooks_for(profile.notify)
+        if not hooks:
+            raise ApiError("no notifications are configured for this library"
+                           + (f" under mode {mode}" if mode else ""))
+        sample = str(Path(body.get("path") or "/media/Example (2024)/"
+                          "Example (2024) - Bluray-1080p.mkv"))
+        payload = notify_mod.payload_for(
+            sample, library=lib.id, mode=mode, status="done",
+            in_size=8 * 2**30, out_size=3 * 2**30, elapsed=1800.0,
+            reasons=["test notification"])
+        payload["event"] = "test"
+        n = self.engine.notifier.dispatch(hooks, payload)
+        return {"ok": True, "message": f"queued {n} test call(s)",
+                "urls": [notify_mod.expand(h.url, payload) for h in hooks]}
 
     def api_history_clear(self, body: dict[str, Any]) -> dict[str, Any]:
         n = self.engine.db.clear_history()

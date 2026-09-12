@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import ffmpeg
+from . import ffmpeg, notify
 from .config import Config, ConfigError, LibraryCfg, resolve_library
 from .db import Db
 from .plan import FilePlan, plan_file
@@ -69,6 +69,10 @@ class Engine:
         # the same outcome as the scan that follows.
         self._modes: dict[str, str] = {}
         self._cancelled: set[str] = set()
+        # Outbound webhooks are queued on their own thread: a mass import can
+        # finish a dozen files at once, and none of them should wait on
+        # somebody else's HTTP server.
+        self.notifier = notify.Notifier()
         self._active: dict[str, ActiveJob] = {}
         self._lock = threading.RLock()
 
@@ -97,13 +101,16 @@ class Engine:
                              daemon=True)
         t.start()
         self._threads.append(t)
+        self.notifier.start()
         log.info("started %d worker(s)", self.cfg.workers.count)
 
     def stop(self) -> None:
         self._stop.set()
+        self.notifier.stop()
 
     def join(self, timeout: float = 30.0) -> None:
         deadline = time.monotonic() + timeout
+        self.notifier.join(timeout=max(0.1, deadline - time.monotonic()))
         for t in self._threads:
             t.join(timeout=max(0.1, deadline - time.monotonic()))
 
@@ -567,6 +574,20 @@ class Engine:
         )
         self.db.finish_run(run_id, "done", result.in_size, result.out_size,
                            result.elapsed, None, detail)
+        # Only now, with the verified encode in place of the original, is it
+        # true to tell anyone else the file changed. `profile` and not `lib`,
+        # so a mode can add or replace the callbacks for this one request -
+        # which is how an import hook points at Jellyfin without every
+        # scheduled scan doing the same.
+        self.notifier.dispatch(
+            notify.hooks_for(profile.notify),
+            notify.payload_for(
+                str(final), library=lib.id, mode=mode, status=status,
+                original=path, in_size=result.in_size,
+                out_size=result.out_size, elapsed=result.elapsed,
+                reasons=reasons,
+            ),
+        )
         log.info(
             "%s: %.2f GB -> %.2f GB (%.0f%%) in %s",
             final.name, result.in_size / 2**30, result.out_size / 2**30,

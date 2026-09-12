@@ -66,6 +66,13 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
 - `db.py` — SQLite at `config/state.db`. `files` keyed by path, carrying `(size, mtime)` so
   an unchanged file that settled as `done`/`skip` is never re-probed; `history` records runs.
   Statuses: `pending|queued|running|skip|done|failed`.
+- `notify.py` — outbound webhooks. `Notifier` owns a `queue.Queue` and one delivery
+  thread, so a bulk import that finishes twenty files at once never blocks a worker on
+  someone else's HTTP server. Delivery is **best effort**: 5xx/timeouts retry with a
+  growing backoff, 4xx does not, and a hook that never succeeds is logged and dropped —
+  the file on disk is already correct, so no encode state may depend on a third party.
+  `notify.depth` counts in-flight retries as well as queued calls, or `join()` would
+  report an empty backlog while a call was mid-backoff.
 - `web.py` + `static/` — dispatch-dict routing to `api_*` methods, dependency-free SPA. No
   authentication anywhere, by design; the panel is trusted-network only.
 - `cli.py` — argparse subcommands sharing the same `Engine`. `scan`/`check`/`libraries`
@@ -79,6 +86,13 @@ video / audio / subtitles / output has its own `enabled` switch, and a disabled 
 its streams through untouched. `Config.library_for(path)` routes a file by longest matching
 root; overlapping library paths are rejected at config-validation time precisely because a
 file under two libraries would have an ambiguous profile.
+
+Notifications are part of the library profile (`LibraryCfg.notify`) for the same reason
+everything else is: whether Jellyfin should be told about a file is a property of the
+library, and being an ordinary dotted key means a **mode can override it** — an import
+hook adds a callback that scheduled scans do not make. `engine._process_one` fires them
+from `profile.notify` (the mode-resolved copy), and only on the success path after
+`replace_original`.
 
 Global config (`workers`, `schedule`, `output.temp_dir`, `web`) is about *how the daemon
 runs*, not about what a file becomes.
