@@ -59,8 +59,7 @@ class AudioCfg:
     downmix_request: str = "-downmix stereo"
     stereo_encoder: str = "auto"
     stereo_codec: str = "aac"
-    stereo_bitrate: str = "160k"
-    stereo_convert_bitrate: str = "192k"
+    stereo_bitrate: str = "192k"
     stereo_title: str = "Stereo"
     commentary_pattern: str = (
         r"commentary|comment|director|cast|crew|isolated|descriptive"
@@ -466,11 +465,8 @@ MODE_META: dict[str, dict[str, Any]] = {
         "desc": "Codec name the encoder produces, used to recognise an existing "
                 "stereo track so it is re-used instead of rebuilt."},
     "audio.stereo_bitrate": {
-        "desc": "Bitrate for a stereo track folded down from a surround mix."},
-    "audio.stereo_convert_bitrate": {
-        "desc": "Bitrate for a track that was already 2.0 and is only being "
-                "re-encoded to AAC. Higher than the downmix bitrate, because "
-                "it is a straight transcode of the mix rather than a fold-down."},
+        "desc": "Bitrate for the stereo track, whether it was folded down from "
+                "a surround mix or was already 2.0 and only re-encoded to AAC."},
     "audio.stereo_title": {"desc": "Title tag written on the stereo track."},
     "audio.commentary_pattern": {
         "desc": "Regex matched against track titles to detect commentary and "
@@ -1153,6 +1149,16 @@ def _migrate_settings(raw: dict[str, Any]) -> dict[str, Any]:
             audio.pop("keep_best_only", None)
         audio.pop("channel_score", None)
         audio.pop("codec_score", None)
+
+        # A fold-down and a straight 2.0 transcode used to get their own
+        # bitrates. One setting covers both now, so the pair has to collapse
+        # to a single value: a downmix bitrate the user never touched was
+        # only ever the old default, and the transcode value is the better
+        # number, so that one survives - but an explicit choice is theirs and
+        # is kept.
+        convert = audio.pop("stereo_convert_bitrate", None)
+        if convert is not None and audio.get("stereo_bitrate", "160k") == "160k":
+            audio["stereo_bitrate"] = convert
         out["audio"] = audio
     return out
 

@@ -384,7 +384,7 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
             # carrying the same mix twice.
             plan.streams.append(StreamPlan(
                 s["index"], "audio", a.stereo_encoder,
-                extra=["-b:{i}", a.stereo_convert_bitrate],
+                extra=["-b:{i}", a.stereo_bitrate],
                 disposition=want(s, default),
                 title=a.stereo_title if default else None,
                 language=lang_of(s),
@@ -392,7 +392,7 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
             ))
             plan.reasons.append(
                 f"re-encode {codec_of(s)} stereo to {a.stereo_codec} "
-                f"{a.stereo_convert_bitrate}")
+                f"{a.stereo_bitrate}")
             continue
         plan.streams.append(StreamPlan(
             s["index"], "audio", "copy",

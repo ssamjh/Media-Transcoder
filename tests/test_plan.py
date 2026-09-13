@@ -481,7 +481,7 @@ class TestDownmixMethod(Base):
         s = self.stereo([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1)])
         self.assertIn("-b:{i}", s.extra)
         self.assertNotIn("-q:{i}", s.extra)
-        self.assertEqual(s.extra[s.extra.index("-b:{i}") + 1], "160k")
+        self.assertEqual(s.extra[s.extra.index("-b:{i}") + 1], "192k")
         self.assertEqual(s.language, "eng")
         self.assertEqual(s.title, "Stereo")
         self.assertEqual(s.disposition, "default")
@@ -736,7 +736,7 @@ class TestArgs(Base):
         self.assertIn("-c:0 copy", joined)
         self.assertIn(f"-c:1 {encoder_for(ENCODER)}", joined)
         self.assertIn("-ac:1 2", joined)
-        self.assertIn("-b:1 160k", joined)
+        self.assertIn("-b:1 192k", joined)
         self.assertIn("title=Stereo", joined)
         self.assertIn("language=eng", joined)
 

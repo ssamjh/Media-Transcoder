@@ -259,6 +259,36 @@ max_size_ratio = 1.5
         with self.assertRaises(ConfigError):
             self.load("only_replace_if_bigger = true")
 
+    AUDIO_HEAD = """
+[[libraries]]
+name = "TV"
+paths = ["/media/TV"]
+[libraries.audio]
+"""
+
+    def load_audio(self, body: str):
+        cfg = cfgmod.loads(self.AUDIO_HEAD + body)
+        return cfg.mode(cfg.libraries[0].mode).audio
+
+    def test_the_two_stereo_bitrates_collapse_to_the_transcode_value(self):
+        audio = self.load_audio("""
+stereo_bitrate = "160k"
+stereo_convert_bitrate = "192k"
+""")
+        self.assertEqual(audio.stereo_bitrate, "192k")
+
+    def test_an_explicit_downmix_bitrate_survives_the_collapse(self):
+        audio = self.load_audio("""
+stereo_bitrate = "128k"
+stereo_convert_bitrate = "192k"
+""")
+        self.assertEqual(audio.stereo_bitrate, "128k")
+
+    def test_a_lone_convert_bitrate_becomes_the_stereo_bitrate(self):
+        self.assertEqual(
+            self.load_audio('stereo_convert_bitrate = "256k"').stereo_bitrate,
+            "256k")
+
 
 class TestValidation(unittest.TestCase):
     def setUp(self):
