@@ -389,6 +389,58 @@ class TestStereoConversion(Base):
         self.assertIsNone(french.title)
 
 
+class TestStereoBitrateLadder(Base):
+    """An existing 2.0 track is re-encoded at a rate its own bitrate earns."""
+
+    def rate(self, bitrate, codec="ac3"):
+        p = self.plan([V(0, "hevc"), A(1, codec, 2, "eng", default=1,
+                                       bitrate=bitrate)])
+        stream = self.kinds(p, "audio")[0]
+        return stream.extra[stream.extra.index("-b:{i}") + 1]
+
+    def test_a_thin_source_gets_the_low_band(self):
+        self.assertEqual(self.rate(96_000), "96k")
+
+    def test_the_low_threshold_is_inclusive(self):
+        self.assertEqual(self.rate(112_000), "96k")
+
+    def test_a_middling_source_gets_the_mid_band(self):
+        self.assertEqual(self.rate(128_000), "128k")
+
+    def test_the_mid_threshold_is_inclusive(self):
+        self.assertEqual(self.rate(160_000), "128k")
+
+    def test_a_fat_source_gets_the_configured_bitrate(self):
+        self.assertEqual(self.rate(448_000), "192k")
+
+    def test_an_unrecorded_bitrate_falls_back_rather_than_down(self):
+        """Matroska often omits the rate, and unknown is not tiny."""
+        self.assertEqual(self.rate(None), "192k")
+
+    def test_the_reason_names_the_rate_actually_chosen(self):
+        p = self.plan([V(0, "hevc"),
+                       A(1, "mp3", 2, "eng", default=1, bitrate=128_000)])
+        self.assertIn("re-encode mp3 stereo to aac 128k", p.reasons)
+
+    def test_zeroed_thresholds_give_a_flat_bitrate(self):
+        self.mode.audio.low_max_source_bitrate = "0"
+        self.mode.audio.mid_max_source_bitrate = "0"
+        self.assertEqual(self.rate(96_000), "192k")
+
+    def test_a_fold_down_is_not_laddered(self):
+        """A 5.1 source rate says nothing about what its downmix needs."""
+        p = self.plan([V(0, "hevc"),
+                       A(1, "eac3", 6, "eng", default=1, bitrate=96_000)])
+        stream = self.kinds(p, "audio")[0]
+        self.assertEqual(stream.extra[stream.extra.index("-b:{i}") + 1], "192k")
+
+    def test_an_aac_track_is_still_copied_whatever_its_bitrate(self):
+        p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo",
+                                       default=1, bitrate=64_000)])
+        self.assertEqual(self.kinds(p, "audio")[0].codec, "copy")
+        self.assertFalse(p.needs_work, p.reasons)
+
+
 class TestDownmixSelection(Base):
     """Which surround track gets folded down, and which never may."""
 

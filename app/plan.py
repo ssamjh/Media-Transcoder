@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import Config, Profile
+from .config import Config, Profile, parse_bitrate
 from .probe import (
     Probe, bitrate_of, channels_of, codec_of, is_attached_pic, is_comment,
     is_default, is_visual_impaired, lang_of, title_of,
@@ -354,6 +354,30 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
         plan.reasons.append("name the stereo track")
         return a.stereo_title
 
+    def convert_bitrate(s: dict[str, Any]) -> str:
+        """What to spend re-encoding an existing 2.0 track to AAC.
+
+        Only this path is laddered. A fold-down is judged by the configured
+        stereo_bitrate alone, because a 640k 5.1 source rate says nothing
+        about what two channels folded out of it need - whereas a 2.0 track
+        already carries the rate someone chose for exactly this mix, and
+        re-encoding a 128k one at 192k buys size and no quality.
+
+        A rate the container does not record reads as 0, which must fall
+        through to the configured bitrate and not to the bottom of the
+        ladder: Matroska often omits it, and "unknown" is not "tiny".
+        """
+        source = bitrate_of(s)
+        if source <= 0:
+            return a.stereo_bitrate
+        bands = ((a.low_max_source_bitrate, a.stereo_bitrate_low),
+                 (a.mid_max_source_bitrate, a.stereo_bitrate_mid))
+        for threshold, target in bands:
+            limit = parse_bitrate(threshold)
+            if limit and source <= limit:
+                return target
+        return a.stereo_bitrate
+
     if downmix is not None:
         extra = ["-ac:{i}", "2", "-b:{i}", a.stereo_bitrate]
         input_extra: list[str] = []
@@ -382,9 +406,10 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
             # Already 2.0, wrong codec: transcoded in place. Keeping the
             # source track beside its own AAC copy would leave the file
             # carrying the same mix twice.
+            bitrate = convert_bitrate(s)
             plan.streams.append(StreamPlan(
                 s["index"], "audio", a.stereo_encoder,
-                extra=["-b:{i}", a.stereo_bitrate],
+                extra=["-b:{i}", bitrate],
                 disposition=want(s, default),
                 title=a.stereo_title if default else None,
                 language=lang_of(s),
@@ -392,7 +417,7 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
             ))
             plan.reasons.append(
                 f"re-encode {codec_of(s)} stereo to {a.stereo_codec} "
-                f"{a.stereo_bitrate}")
+                f"{bitrate}")
             continue
         plan.streams.append(StreamPlan(
             s["index"], "audio", "copy",

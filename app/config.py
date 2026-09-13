@@ -60,6 +60,15 @@ class AudioCfg:
     stereo_encoder: str = "auto"
     stereo_codec: str = "aac"
     stereo_bitrate: str = "192k"
+    # A track that is already 2.0 but in the wrong codec is re-encoded, and
+    # its own bitrate says what it is worth spending on: lifting a 128k mp3 to
+    # 192k aac buys nothing but size. Source rates at or below the two
+    # thresholds get the matching target instead. Either threshold at "0"
+    # switches its band off; both off is a flat stereo_bitrate for everything.
+    stereo_bitrate_mid: str = "128k"
+    stereo_bitrate_low: str = "96k"
+    mid_max_source_bitrate: str = "160k"
+    low_max_source_bitrate: str = "112k"
     stereo_title: str = "Stereo"
     commentary_pattern: str = (
         r"commentary|comment|director|cast|crew|isolated|descriptive"
@@ -465,8 +474,22 @@ MODE_META: dict[str, dict[str, Any]] = {
         "desc": "Codec name the encoder produces, used to recognise an existing "
                 "stereo track so it is re-used instead of rebuilt."},
     "audio.stereo_bitrate": {
-        "desc": "Bitrate for the stereo track, whether it was folded down from "
-                "a surround mix or was already 2.0 and only re-encoded to AAC."},
+        "desc": "Bitrate for the stereo track. Every fold-down from a surround "
+                "mix gets this; a track that was already 2.0 gets it only when "
+                "its own bitrate is above both thresholds below, or when the "
+                "file does not record one."},
+    "audio.stereo_bitrate_mid": {
+        "desc": "Bitrate for an existing 2.0 track whose own bitrate is at or "
+                "below mid_max_source_bitrate."},
+    "audio.stereo_bitrate_low": {
+        "desc": "Bitrate for an existing 2.0 track whose own bitrate is at or "
+                "below low_max_source_bitrate."},
+    "audio.mid_max_source_bitrate": {
+        "desc": "Source bitrate at or below which an existing 2.0 track is "
+                "re-encoded at stereo_bitrate_mid. \"0\" turns the band off."},
+    "audio.low_max_source_bitrate": {
+        "desc": "Source bitrate at or below which an existing 2.0 track is "
+                "re-encoded at stereo_bitrate_low. \"0\" turns the band off."},
     "audio.stereo_title": {"desc": "Title tag written on the stereo track."},
     "audio.commentary_pattern": {
         "desc": "Regex matched against track titles to detect commentary and "
@@ -638,6 +661,25 @@ def mode_schema(mode: ModeCfg) -> list[dict[str, Any]]:
 
 # --- validation -------------------------------------------------------------
 
+def parse_bitrate(text: str) -> int | None:
+    """Bits per second from an ffmpeg-style rate, or None if it is not one.
+
+    Bitrates are written the way ffmpeg takes them - "192k", "1.5M", or a
+    bare count of bits - because they are handed straight to it. Planning has
+    to compare them against a probed rate, so the same reading is used to
+    validate what is saved and to place a track on the ladder.
+    """
+    raw = str(text).strip()
+    if not raw:
+        return None
+    scale = {"k": 1_000, "m": 1_000_000}.get(raw[-1].lower())
+    try:
+        value = float(raw[:-1] if scale else raw) * (scale or 1)
+    except ValueError:
+        return None
+    return int(value) if value >= 0 else None
+
+
 def _coerce(key: str, current: Any, incoming: Any,
             meta: dict[str, dict[str, Any]]) -> Any:
     m = meta.get(key, {})
@@ -781,6 +823,28 @@ def _validate_profile(lib: ModeCfg | Profile) -> None:
         raise ConfigError(
             "video height bands must increase: sd_max_height <= "
             "h720_max_height <= h1080_max_height"
+        )
+
+    a = lib.audio
+    rates: dict[str, int] = {}
+    for name in ("stereo_bitrate", "stereo_bitrate_mid", "stereo_bitrate_low",
+                 "mid_max_source_bitrate", "low_max_source_bitrate"):
+        parsed = parse_bitrate(getattr(a, name))
+        if parsed is None:
+            raise ConfigError(
+                f"audio.{name}: {getattr(a, name)!r} is not a bitrate "
+                f"(try \"192k\", \"1.5M\", or a count of bits)")
+        rates[name] = parsed
+    if not (rates["stereo_bitrate_low"] <= rates["stereo_bitrate_mid"]
+            <= rates["stereo_bitrate"]):
+        raise ConfigError(
+            "audio bitrate bands must increase: stereo_bitrate_low <= "
+            "stereo_bitrate_mid <= stereo_bitrate"
+        )
+    if rates["low_max_source_bitrate"] > rates["mid_max_source_bitrate"]:
+        raise ConfigError(
+            "audio.low_max_source_bitrate must not be above "
+            "audio.mid_max_source_bitrate, or the low band could never be hit"
         )
 
     o = lib.output

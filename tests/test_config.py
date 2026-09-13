@@ -337,6 +337,24 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(ConfigError):
             self.set_mode({"video.sd_max_height": 2000})
 
+    def test_rejects_a_bitrate_that_is_not_one(self):
+        with self.assertRaises(ConfigError):
+            self.set_mode({"audio.stereo_bitrate": "loud"})
+
+    def test_rejects_inconsistent_bitrate_bands(self):
+        with self.assertRaises(ConfigError):
+            self.set_mode({"audio.stereo_bitrate_low": "320k"})
+
+    def test_rejects_a_low_threshold_above_the_mid_one(self):
+        with self.assertRaises(ConfigError):
+            self.set_mode({"audio.low_max_source_bitrate": "256k"})
+
+    def test_accepts_a_consistent_ladder(self):
+        self.set_mode({"audio.stereo_bitrate": "256k",
+                       "audio.stereo_bitrate_mid": "192k",
+                       "audio.stereo_bitrate_low": "128k"})
+        self.assertEqual(self.mode.audio.stereo_bitrate_low, "128k")
+
     def test_rejects_empty_library_paths(self):
         with self.assertRaises(ConfigError):
             cfgmod.apply_library_updates(self.c, self.lib, {"paths": []})
