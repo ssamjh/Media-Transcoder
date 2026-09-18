@@ -286,6 +286,12 @@ def discard(result: EncodeResult) -> None:
 # by Engine; this only bounds how long the UI can sit on a stale percentage.
 COPY_CHUNK = 1 * 1024 * 1024
 COPY_REPORT_INTERVAL = 0.10
+# How many written bytes may sit in the page cache before a flush+fsync.
+# write() returns at RAM speed, so without a periodic sync the progress bar
+# races ahead of the wire and then "100%" stalls on one giant fsync at the
+# end.  Large enough that the fsync round-trips don't throttle the copy,
+# small enough that reported progress never runs far ahead of the target.
+COPY_SYNC_INTERVAL = 64 * 1024 * 1024
 
 
 def over_ceiling(in_size: int, out_size: int, out_cfg: LibOutputCfg) -> bool:
@@ -333,6 +339,7 @@ def _copy_with_progress(src: Path, dst: Path,
     """
     total = src.stat().st_size or 1
     done = 0
+    since_sync = 0
     started = time.monotonic()
     last_report = 0.0
     with open(src, "rb") as r, open(dst, "wb") as w:
@@ -342,6 +349,11 @@ def _copy_with_progress(src: Path, dst: Path,
                 break
             w.write(buf)
             done += len(buf)
+            since_sync += len(buf)
+            if since_sync >= COPY_SYNC_INTERVAL:
+                w.flush()
+                os.fsync(w.fileno())
+                since_sync = 0
             # Always report the first and last chunk.  Intermediate chunks are
             # frequent enough to feel live without turning a large copy into
             # a callback storm.

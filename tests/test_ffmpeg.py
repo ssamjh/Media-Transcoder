@@ -7,6 +7,7 @@ and nothing else would ever remove it. No ffmpeg is involved.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -107,6 +108,32 @@ class CopyBackTest(unittest.TestCase):
         self.assertAlmostEqual(seen[-1], 100.0, places=6)
         self.assertGreater(len(seen), 1)          # actually chunked
         self.assertEqual(int(src.stat().st_mtime), int(dst.stat().st_mtime))
+
+    def test_copy_syncs_periodically_so_progress_tracks_the_target(self):
+        """One fsync at the end lets the bar hit 100% while the bytes are
+        still in the page cache; the copy must drain as it reports."""
+        src = self.root / "in.bin"
+        dst = self.root / "out.bin"
+        src.write_bytes(b"\0" * (4 * ffmpeg.COPY_CHUNK))
+
+        self.addCleanup(setattr, ffmpeg, "COPY_SYNC_INTERVAL",
+                        ffmpeg.COPY_SYNC_INTERVAL)
+        ffmpeg.COPY_SYNC_INTERVAL = ffmpeg.COPY_CHUNK
+
+        real_fsync = os.fsync
+        self.addCleanup(setattr, os, "fsync", real_fsync)
+        syncs = []
+
+        def counting_fsync(fd):
+            syncs.append(fd)
+            real_fsync(fd)
+
+        os.fsync = counting_fsync
+        ffmpeg._copy_with_progress(src, dst, None)
+
+        # One per full interval, plus the final catch-all.
+        self.assertEqual(len(syncs), 5)
+        self.assertEqual(dst.stat().st_size, 4 * ffmpeg.COPY_CHUNK)
 
     def test_only_one_file_is_copied_back_at_a_time(self):
         """A network share is one link; parallel copies just halve each other."""
