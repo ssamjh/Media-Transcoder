@@ -110,6 +110,11 @@ files.
 
 ## The panel
 
+The dashboard updates quickly while work is active. Each job keeps its encode
+progress separate from the copy-back progress, including copy percentage,
+bytes, MB/s, and ETA; a job waiting for the serialized library copy is shown as
+waiting for its copy slot.
+
 **Dashboard** — live counters, currently-encoding files with progress, speed
 and ETA, the queue, the last scan's per-library results, and recent history.
 Buttons for *Scan now*, *Queue pending*, *Cancel all*, and a toggle for

@@ -64,6 +64,9 @@ async function act(path, body, okMessage) {
   try {
     const d = await api(path, body || {});
     toast(okMessage || d.message || "Done");
+    if (typeof scheduleStatus === "function" && current === "dashboard") {
+      scheduleStatus(0);
+    }
     return d;
   } catch (e) {
     toast(e.message, true);
@@ -519,13 +522,91 @@ el("l-add").addEventListener("click", () => {
 
 let schedBusy = false;
 
+function activeJobMarkup(j) {
+  return `<div class="job active-job" data-job-path="${esc(j.path)}">
+    <div class="job-head">
+      <div class="job-name">${esc(j.name)}</div>
+      <span class="tag" data-job-stage>${esc(j.stage || "encoding")}</span>
+      <button class="small danger" data-cancel="${esc(j.path)}">Cancel</button>
+    </div>
+    <div class="meta job-summary" data-job-summary></div>
+    <div class="job-reasons" data-job-reasons></div>
+    <div class="stage-progress" data-stage="encode">
+      <div class="stage-line"><span>Encode</span><span data-stage-meta></span></div>
+      <div class="bar-track"><i data-stage-bar></i></div>
+    </div>
+    <div class="stage-progress" data-stage="copy">
+      <div class="stage-line"><span>Copy to library</span><span data-stage-meta></span></div>
+      <div class="bar-track"><i data-stage-bar></i></div>
+    </div>
+  </div>`;
+}
+
+function updateActiveJobs(jobs) {
+  const root = el("active");
+  const existing = [...root.querySelectorAll("[data-job-path]")];
+  const oldKeys = existing.map((n) => n.dataset.jobPath).join("|");
+  const newKeys = jobs.map((j) => j.path).join("|");
+  if (oldKeys !== newKeys) {
+    root.innerHTML = jobs.length
+      ? jobs.map(activeJobMarkup).join("")
+      : '<div class="empty">Idle</div>';
+    root.querySelectorAll("[data-cancel]").forEach((b) =>
+      b.addEventListener("click", () => act("/api/cancel", { path: b.dataset.cancel })));
+  }
+  for (const j of jobs) {
+    const node = root.querySelector(`[data-job-path="${CSS.escape(j.path)}"]`);
+    if (!node) continue;
+    const stage = j.stage || "encoding";
+    const waiting = stage === "waiting to copy";
+    node.querySelector("[data-job-stage]").textContent = stage;
+    node.querySelector("[data-job-stage]").className =
+      `tag${stage === "copying" ? " info" : ""}`;
+    node.querySelector("[data-job-summary]").textContent =
+      `${hms(j.elapsed)} elapsed - ${bytes(j.in_size)}${j.library ? " - " + j.library : ""}`;
+    node.querySelector("[data-job-reasons]").textContent = (j.reasons || []).join("; ");
+
+    const encode = node.querySelector('[data-stage="encode"]');
+    const copy = node.querySelector('[data-stage="copy"]');
+    const encodePct = Number(j.encode_percent ?? j.percent ?? 0);
+    const copyPct = Number(j.copy_percent ?? 0);
+    encode.querySelector("[data-stage-bar]").style.width = `${encodePct}%`;
+    copy.querySelector("[data-stage-bar]").style.width = `${waiting ? 100 : copyPct}%`;
+    copy.querySelector(".bar-track").classList.toggle("idle", waiting);
+    encode.classList.toggle("current", stage === "encoding");
+    copy.classList.toggle("current", stage === "copying" || waiting);
+    encode.querySelector("[data-stage-meta]").textContent =
+      `${encodePct.toFixed(1)}% - ${Number(j.encode_speed ?? j.speed ?? 0).toFixed(2)}x` +
+      (j.encode_eta ? ` - ${hms(j.encode_eta)} left` : "");
+    copy.querySelector("[data-stage-meta]").textContent = waiting
+      ? "waiting for copy slot"
+      : `${copyPct.toFixed(1)}% - ${Number(j.copy_speed || 0).toFixed(1)} MB/s - ` +
+        `${bytes(j.copy_bytes)} / ${bytes(j.copy_total)}` +
+        (j.copy_eta ? ` - ${hms(j.copy_eta)} left` : "");
+  }
+}
+
+let statusBusy = false;
+let statusTimer = 0;
+
+function scheduleStatus(delay) {
+  clearTimeout(statusTimer);
+  if (!document.hidden && current === "dashboard") {
+    statusTimer = setTimeout(tick, delay);
+  }
+}
+
 async function tick() {
+  if (statusBusy) return;
+  statusBusy = true;
   let d;
   try {
     d = await api("/api/status");
   } catch {
     el("conn").textContent = "disconnected";
     el("conn").className = "pill bad";
+    statusBusy = false;
+    scheduleStatus(1500);
     return;
   }
   el("conn").className = "pill";
@@ -542,6 +623,7 @@ async function tick() {
   if (d.dry_run) warn.push("dry run");
   const off = d.libraries.filter((l) => !l.enabled).length;
   if (off) warn.push(`${off} library disabled`);
+  if (d.counts?.failed) warn.push(`${d.counts.failed} failed`);
   if (warn.length) note += `  •  ${warn.join(", ")}`;
   el("sched-note").textContent = note;
 
@@ -558,20 +640,20 @@ async function tick() {
 
   const c = d.counts || {};
   el("tiles").innerHTML = [
-    [d.libraries.length, "libraries"],
     [d.total, "files tracked"],
     [c.pending || 0, "need work"],
     [d.queue_depth, "queued"],
-    [d.active.length, "encoding"],
+    [d.active.length, "in progress"],
     [d.encoded, "encoded"],
     [bytes(d.bytes_saved), "reclaimed"],
-    [c.failed || 0, "failed"],
   ].map(([n, l]) =>
     `<div class="tile"><div class="n">${n}</div><div class="l">${l}</div></div>`
   ).join("");
 
   el("active-count").textContent = d.active.length || "";
-  el("active").innerHTML = d.active.length ? d.active.map((j) => {
+  /* The keyed renderer below owns this section.  The legacy single-bar branch
+     stays unreachable for compatibility with older inline customisations. */
+  if (false) el("active").innerHTML = d.active.length ? d.active.map((j) => {
     const stage = j.stage || "encoding";
     const copying = stage === "copying";
     const waiting = stage === "waiting to copy";
@@ -596,8 +678,9 @@ async function tick() {
     </div>`;
   }).join("") : '<div class="empty">Idle</div>';
 
-  el("active").querySelectorAll("[data-cancel]").forEach((b) =>
+  if (false) el("active").querySelectorAll("[data-cancel]").forEach((b) =>
     b.addEventListener("click", () => act("/api/cancel", { path: b.dataset.cancel })));
+  updateActiveJobs(d.active);
 
   el("queued-count").textContent = d.queue_depth || "";
   el("queued").innerHTML = d.queued.length
@@ -635,6 +718,8 @@ async function tick() {
       ${d.recent.map((r) => rowHistory(r, d.now)).join("")}
     </tbody></table>` : '<div class="empty">Nothing yet</div>';
   wireRows(el("recent"));
+  statusBusy = false;
+  scheduleStatus(d.scanning || d.active.length ? 500 : 2500);
 }
 
 function rowHistory(r, now) {
@@ -1017,7 +1102,10 @@ function renderIntegration() {
 show(location.hash.slice(1) || "dashboard");
 loadModes();
 tick();
-setInterval(() => { if (current === "dashboard") tick(); }, 2000);
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(statusTimer);
+  if (!document.hidden && current === "dashboard") tick();
+});
 setInterval(() => { if (current === "files") loadFiles(); }, 8000);
 setInterval(() => {
   if (current !== "libraries") return;

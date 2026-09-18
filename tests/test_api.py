@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import config as cfgmod      # noqa: E402
 from app.config import Config         # noqa: E402
 from app.db import Db                 # noqa: E402
-from app.engine import Engine         # noqa: E402
+from app.engine import ActiveJob, Engine  # noqa: E402
 from app.web import serve             # noqa: E402
 
 
@@ -123,12 +123,30 @@ class ApiTest(unittest.TestCase):
     # --- reads ------------------------------------------------------------
 
     def test_status(self):
-        d, _ = self.get("/api/status")
-        for key in ("counts", "active", "queued", "recent", "workers",
-                    "schedule_enabled", "bytes_saved", "queue_depth"):
-            self.assertIn(key, d)
-        self.assertEqual(d["counts"]["pending"], 1)
-        self.assertEqual(d["counts"]["failed"], 1)
+        job = ActiveJob(
+            path=self.A, started=1.0, stage="copying",
+            encode_percent=100.0, encode_speed=1.25,
+            copy_percent=40.0, copy_speed=85.5,
+            copy_bytes=400, copy_total=1000,
+        )
+        with self.engine._lock:
+            self.engine._active[self.A] = job
+        try:
+            d, _ = self.get("/api/status")
+            for key in ("counts", "active", "queued", "recent", "workers",
+                        "schedule_enabled", "bytes_saved", "queue_depth"):
+                self.assertIn(key, d)
+            self.assertEqual(d["counts"]["pending"], 1)
+            self.assertEqual(d["counts"]["failed"], 1)
+            active = d["active"][0]
+            self.assertEqual(active["encode_percent"], 100.0)
+            self.assertEqual(active["copy_percent"], 40.0)
+            self.assertEqual(active["copy_speed"], 85.5)
+            self.assertEqual(active["copy_bytes"], 400)
+            self.assertEqual(active["copy_total"], 1000)
+        finally:
+            with self.engine._lock:
+                self.engine._active.pop(self.A, None)
 
     def test_files_filter_search_and_paging(self):
         d, _ = self.get("/api/files?status=all")

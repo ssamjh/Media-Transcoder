@@ -228,17 +228,34 @@ class Handler(BaseHTTPRequestHandler):
         active = []
         for j in eng.active:
             elapsed = now - j.started
-            # Progress belongs to the current stage, so the ETA has to be
-            # measured from when that stage started - a copy that is 40% done
-            # says nothing about the hour spent encoding before it.
             in_stage = now - (j.stage_started or j.started)
-            eta = (in_stage / j.percent * (100 - j.percent)) if j.percent > 1 else 0
+            encode_elapsed = now - (j.encode_started or j.started)
+            copy_elapsed = now - (j.copy_started or now)
+            encode_eta = ((encode_elapsed / j.encode_percent)
+                          * (100 - j.encode_percent)
+                          if j.encode_percent > 1 else 0)
+            copy_eta = ((copy_elapsed / j.copy_percent)
+                        * (100 - j.copy_percent)
+                        if j.copy_percent > 1 else 0)
+            # Keep the old stage-local fields for API clients that already
+            # consume them, while exposing explicit encode/copy values for the
+            # panel and newer integrations.
+            eta = copy_eta if j.stage == "copying" else (
+                encode_eta if j.stage == "encoding" else 0)
             active.append({
                 "path": j.path,
                 "name": Path(j.path).name,
                 "stage": j.stage,
                 "percent": round(j.percent, 2),
                 "speed": round(j.speed, 2),
+                "encode_percent": round(j.encode_percent, 2),
+                "encode_speed": round(j.encode_speed, 2),
+                "encode_eta": encode_eta,
+                "copy_percent": round(j.copy_percent, 2),
+                "copy_speed": round(j.copy_speed, 2),
+                "copy_bytes": j.copy_bytes,
+                "copy_total": j.copy_total,
+                "copy_eta": copy_eta,
                 "elapsed": elapsed,
                 "stage_elapsed": in_stage,
                 "eta": eta,

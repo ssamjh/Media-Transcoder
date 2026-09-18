@@ -32,6 +32,18 @@ MAX_ATTEMPTS = 3
 class ActiveJob:
     path: str
     started: float
+    # Encode and copy progress are intentionally independent.  A completed
+    # encode must stay at 100% while the verified result is copied back.
+    encode_percent: float = 0.0
+    encode_speed: float = 0.0
+    encode_started: float = 0.0
+    copy_percent: float = 0.0
+    copy_speed: float = 0.0
+    copy_bytes: int = 0
+    copy_total: int = 0
+    copy_started: float = 0.0
+    # Kept as a small compatibility surface for callers that used the old
+    # single-stage fields. They are updated to the current stage below.
     percent: float = 0.0
     speed: float = 0.0
     in_size: int = 0
@@ -499,12 +511,21 @@ class Engine:
         whole time with the copy's own progress.
         """
         def copied(pct: float, mbps: float) -> None:
+            job.copy_percent, job.copy_speed = pct, mbps
+            job.copy_bytes = min(job.copy_total,
+                                 int(job.copy_total * pct / 100))
             job.percent, job.speed = pct, mbps
 
-        job.stage, job.percent, job.speed = "waiting to copy", 0.0, 0.0
-        job.stage_started = time.time()
+        job.encode_percent = 100.0
+        job.stage = "waiting to copy"
+        job.copy_percent = job.copy_bytes = 0
+        job.copy_speed = 0.0
+        job.copy_total = getattr(result, "out_size", 0)
+        job.percent = job.speed = 0.0
+        job.stage_started = job.copy_started = time.time()
         with self._copy_lock:
-            job.stage, job.stage_started = "copying", time.time()
+            job.stage = "copying"
+            job.stage_started = job.copy_started = time.time()
             return ffmpeg.replace_original(src, result, self.cfg, profile,
                                            on_progress=copied)
 
@@ -519,7 +540,10 @@ class Engine:
         video this file is going to get - so the run is rebuilt around it
         instead of being thrown away whole.
         """
-        job.stage, job.percent, job.speed = "encoding", 0.0, 0.0
+        job.stage = "encoding"
+        job.encode_percent = job.percent = 0.0
+        job.encode_speed = job.speed = 0.0
+        job.encode_started = time.time()
         job.stage_started = time.time()
         try:
             result = ffmpeg.encode(plan, self.cfg, on_progress=progress,
@@ -586,7 +610,7 @@ class Engine:
 
         job = ActiveJob(path=path, started=time.time(), in_size=plan.size,
                         library=lib.name, reasons=list(plan.reasons), mode=mode,
-                        stage_started=time.time())
+                        stage_started=time.time(), encode_started=time.time())
         with self._lock:
             self._active[path] = job
         self.db.set_status(path, "running")
@@ -596,6 +620,7 @@ class Engine:
         run_id = self.db.start_run(path, detail)
 
         def progress(pct: float, speed: float) -> None:
+            job.encode_percent, job.encode_speed = pct, speed
             job.percent, job.speed = pct, speed
 
         def cancelled() -> bool:

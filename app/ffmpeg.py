@@ -282,7 +282,10 @@ def discard(result: EncodeResult) -> None:
     shutil.rmtree(result.out_path.parent, ignore_errors=True)
 
 
-COPY_CHUNK = 8 * 1024 * 1024
+# Keep copy updates responsive on slower shares.  The copy is still serialized
+# by Engine; this only bounds how long the UI can sit on a stale percentage.
+COPY_CHUNK = 1 * 1024 * 1024
+COPY_REPORT_INTERVAL = 0.10
 
 
 def over_ceiling(in_size: int, out_size: int, out_cfg: LibOutputCfg) -> bool:
@@ -331,6 +334,7 @@ def _copy_with_progress(src: Path, dst: Path,
     total = src.stat().st_size or 1
     done = 0
     started = time.monotonic()
+    last_report = 0.0
     with open(src, "rb") as r, open(dst, "wb") as w:
         while True:
             buf = r.read(COPY_CHUNK)
@@ -338,10 +342,18 @@ def _copy_with_progress(src: Path, dst: Path,
                 break
             w.write(buf)
             done += len(buf)
-            if on_progress:
+            # Always report the first and last chunk.  Intermediate chunks are
+            # frequent enough to feel live without turning a large copy into
+            # a callback storm.
+            now = time.monotonic()
+            if on_progress and (
+                    not last_report
+                    or now - last_report >= COPY_REPORT_INTERVAL
+                    or done >= total):
                 elapsed = max(time.monotonic() - started, 1e-6)
                 on_progress(done / total * 100,
                             done / elapsed / (1024 * 1024))
+                last_report = now
         w.flush()
         os.fsync(w.fileno())
     # Timestamps and mode, the part of copy2 the loop above does not do.

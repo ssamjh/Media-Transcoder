@@ -144,6 +144,8 @@ class CopyBackTest(unittest.TestCase):
         for j in jobs:
             self.assertEqual(j.stage, "copying")
             self.assertEqual(j.percent, 50.0)
+            self.assertEqual(j.copy_percent, 50.0)
+            self.assertEqual(j.copy_speed, 12.5)
 
     def test_a_waiting_job_says_so(self):
         held = threading.Event()
