@@ -174,6 +174,24 @@ class ApiTest(unittest.TestCase):
         self.assertIn("history", d)
         self.assertIn("max_attempts", d)
 
+    def test_completed_history_links_to_renamed_output(self):
+        source = str(Path("/media/TV/old.avi"))
+        final = str(Path("/media/TV/old.mkv"))
+        self.db.upsert(final, size=600, mtime=2.0, status="done", library="tv")
+        run_id = self.db.start_run(source, {"container": "mkv"})
+        self.db.finish_run(run_id, "done", 1000, 600, 1.0,
+                           detail={"container": "mkv"}, final_path=final)
+
+        history, _ = self.get("/api/history")
+        run = next(r for r in history["history"] if r["id"] == run_id)
+        self.assertEqual(run["path"], final)
+        self.assertEqual(run["name"], "old.mkv")
+
+        detail, status = self.get(
+            "/api/file?path=" + urllib.parse.quote(run["path"]))
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["file"]["path"], final)
+
     def test_file_detail_requires_a_known_path(self):
         _, status, _ = self.get_raw("/api/file?path=" + urllib.parse.quote(str(Path("/media/TV/missing.mkv"))))
         self.assertEqual(status, 404)

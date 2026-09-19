@@ -715,7 +715,8 @@ class Engine:
             reasons=reasons,
         )
         self.db.finish_run(run_id, "done", result.in_size, result.out_size,
-                           result.elapsed, rebuilt or None, detail)
+                           result.elapsed, rebuilt or None, detail,
+                           final_path=str(final))
         # Only now, with the verified encode in place of the original, is it
         # true to tell anyone else the file changed. `profile` and not `lib`,
         # so a mode can add or replace the callbacks for this one request -

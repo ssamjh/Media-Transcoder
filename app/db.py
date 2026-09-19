@@ -106,7 +106,38 @@ class Db:
                 "error = 'interrupted by restart' WHERE finished IS NULL",
                 (time.time(),),
             )
+            self._repair_history_paths()
             self._conn.commit()
+
+    def _repair_history_paths(self) -> None:
+        """Relink old successful runs whose output changed extension.
+
+        Earlier versions left history pointing at the source path even after
+        replacing (for example) ``Film.avi`` with the tracked ``Film.mkv``.
+        The plan saved with the run contains the output container, so repair
+        those unambiguous records when the database is opened.
+        """
+        rows = self._conn.execute(
+            "SELECT h.id, h.path, h.detail FROM history h "
+            "LEFT JOIN files f ON f.path = h.path "
+            "WHERE h.status = 'done' AND f.path IS NULL"
+        ).fetchall()
+        for row in rows:
+            detail = loads(row["detail"], {})
+            container = detail.get("container") if isinstance(detail, dict) else None
+            if not isinstance(container, str) or not container:
+                continue
+            final = str(Path(row["path"]).with_suffix("." + container.lstrip(".")))
+            if final == row["path"]:
+                continue
+            tracked = self._conn.execute(
+                "SELECT 1 FROM files WHERE path = ?", (final,)
+            ).fetchone()
+            if tracked:
+                self._conn.execute(
+                    "UPDATE history SET path = ?, name = ? WHERE id = ?",
+                    (final, Path(final).name, row["id"]),
+                )
 
     def close(self) -> None:
         with self._lock:
@@ -282,21 +313,22 @@ class Db:
 
     def finish_run(self, run_id: int, status: str, in_size: int = 0,
                    out_size: int = 0, elapsed: float = 0.0,
-                   error: str | None = None, detail: Any = None) -> None:
+                   error: str | None = None, detail: Any = None,
+                   final_path: str | None = None) -> None:
+        updates = ["finished = ?", "status = ?", "in_size = ?",
+                   "out_size = ?", "elapsed = ?", "error = ?"]
+        values: list[Any] = [time.time(), status, in_size, out_size, elapsed, error]
+        if detail is not None:
+            updates.append("detail = ?")
+            values.append(_json(detail))
+        if final_path is not None:
+            updates.extend(["path = ?", "name = ?"])
+            values.extend([final_path, Path(final_path).name])
+        values.append(run_id)
         with self._lock:
-            if detail is None:
-                self._conn.execute(
-                    "UPDATE history SET finished = ?, status = ?, in_size = ?, "
-                    "out_size = ?, elapsed = ?, error = ? WHERE id = ?",
-                    (time.time(), status, in_size, out_size, elapsed, error, run_id),
-                )
-            else:
-                self._conn.execute(
-                    "UPDATE history SET finished = ?, status = ?, in_size = ?, "
-                    "out_size = ?, elapsed = ?, error = ?, detail = ? WHERE id = ?",
-                    (time.time(), status, in_size, out_size, elapsed, error,
-                     _json(detail), run_id),
-                )
+            self._conn.execute(
+                f"UPDATE history SET {', '.join(updates)} WHERE id = ?", values
+            )
             self._conn.commit()
 
     def history(self, limit: int = 50, offset: int = 0,

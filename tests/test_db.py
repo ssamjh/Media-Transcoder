@@ -71,3 +71,27 @@ class ForgettingTest(unittest.TestCase):
     def test_forget_missing_drops_files_that_are_gone(self):
         self.db.forget_missing(seen=set(), roots=[p("TV")])
         self.assertEqual(self.tracked(), set())
+
+
+class HistoryPathRepairTest(unittest.TestCase):
+    def test_old_history_is_relinked_to_its_tracked_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            source = p("TV", "Film.avi")
+            final = p("TV", "Film.mkv")
+
+            db = Db(db_path)
+            db.upsert(final, size=60, mtime=1.0, status="done", library="tv")
+            run_id = db.start_run(source, {"container": "mkv"})
+            db.finish_run(run_id, "done", 100, 60, 1.0,
+                          detail={"container": "mkv"})
+            db.close()
+
+            reopened = Db(db_path)
+            try:
+                rows, _ = reopened.history()
+                run = next(r for r in rows if r["id"] == run_id)
+                self.assertEqual(run["path"], final)
+                self.assertEqual(run["name"], "Film.mkv")
+            finally:
+                reopened.close()

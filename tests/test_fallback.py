@@ -109,6 +109,26 @@ class TestAcceptedEncode(Base):
         self.assertEqual(self.row()["status"], "done")
         self.assertIsNone(self.row()["error"])
 
+    def test_history_follows_an_output_whose_extension_changed(self):
+        source = self.src.with_suffix(".avi")
+        self.src.rename(source)
+        self.src = source
+
+        def fake_replace(src, result, cfg, profile, on_progress=None):
+            final = src.with_suffix(".mkv")
+            final.write_bytes(b"y")
+            src.unlink()
+            return True
+
+        enginemod.ffmpeg.replace_original = fake_replace
+        self.assertEqual(self.run_one(0.6), "done")
+
+        final = str(source.with_suffix(".mkv"))
+        rows, _ = self.db.history()
+        self.assertEqual(rows[0]["path"], final)
+        self.assertEqual(rows[0]["name"], "Film.mkv")
+        self.assertIsNotNone(self.db.get(final))
+
 
 class TestRejectedForSize(Base):
     def test_a_bigger_output_is_rebuilt_around_the_source_video(self):
