@@ -473,6 +473,13 @@ def _subtitle_codec(s: dict[str, Any], container: str,
     """
     supported = CONTAINER_SUBTITLES.get(container)
     codec = codec_of(s)
+    # ffprobe can expose a Matroska subtitle stream while leaving codec_name
+    # empty (for example, an unsupported codec ID).  It cannot be decoded to
+    # our text fallback, and mapping it makes ffmpeg abort the whole output
+    # with "no decoder found for: none".  There is no safe representation to
+    # preserve, so omit it just as we do an incompatible picture subtitle.
+    if not codec:
+        return None
     if supported is None or codec in supported:
         return "copy"
     if codec in lib.subtitles.image_codecs:
@@ -484,9 +491,15 @@ def _add_subtitle(s: dict[str, Any], lib: Profile, plan: FilePlan) -> None:
     """Copy, convert or drop one subtitle track for the target container."""
     codec = _subtitle_codec(s, plan.container, lib)
     if codec is None:
-        plan.dropped.append(f"subtitle {codec_of(s)} {lang_of(s)}")
-        plan.reasons.append(
-            f"drop {codec_of(s)} subtitle, {plan.container} cannot carry it")
+        source_codec = codec_of(s)
+        label = source_codec or "unknown"
+        plan.dropped.append(f"subtitle {label} {lang_of(s)}")
+        if source_codec:
+            plan.reasons.append(
+                f"drop {source_codec} subtitle, {plan.container} cannot carry it")
+        else:
+            plan.reasons.append(
+                "drop unknown subtitle, no decoder or codec information")
         return
     if codec != "copy":
         plan.reasons.append(

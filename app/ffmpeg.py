@@ -100,6 +100,11 @@ def build_args(plan: FilePlan, dest: str | Path) -> list[str]:
 
     args = [
         FFMPEG, "-hide_banner", "-nostdin", "-y",
+        # AVI files in particular can contain packets with DTS but no PTS.
+        # Matroska refuses to mux those packets when the video is stream-
+        # copied.  Ask the demuxer to fill only missing presentation
+        # timestamps; existing timestamps are left alone.
+        "-fflags", "+genpts",
         *decoder,
         "-i", str(plan.path),
         "-map_metadata", "0",
@@ -178,7 +183,19 @@ def _run(args: list[str], duration: float, on_progress: ProgressCb | None,
     if proc.stderr:
         proc.stderr.close()
     if rc != 0:
-        msg = " | ".join(list(tail)[-4:])[:500]
+        lines = list(tail)
+        # ffmpeg ends most failures with four generic accounting/footer
+        # lines.  Keeping only those hid the useful muxer/decoder diagnostic
+        # immediately above them, so retain the latest error-like lines too.
+        significant = [line for line in lines if re.search(
+            r"error|failed|invalid|cannot|can't|no decoder|timestamp",
+            line, re.I,
+        )]
+        selected = significant[-4:]
+        for line in lines[-4:]:
+            if line not in selected:
+                selected.append(line)
+        msg = " | ".join(selected)[:500]
         raise EncodeError(f"ffmpeg exited {rc}: {msg}")
 
 

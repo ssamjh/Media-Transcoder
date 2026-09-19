@@ -616,6 +616,16 @@ class TestSubtitleContainers(Base):
         self.assertIn("drop mov_text_pictures subtitle, mkv cannot carry it",
                       p.reasons)
 
+    def test_a_subtitle_without_a_codec_is_dropped_not_converted(self):
+        """An unidentified stream has no decoder, so SRT is impossible."""
+        p = self.plan([V(0, "hevc"),
+                       A(1, "aac", 2, "eng", title="Stereo", default=1),
+                       S(2, "eng", codec="")])
+        self.assertEqual(self.kinds(p, "subtitle"), [])
+        self.assertIn("subtitle unknown eng", p.dropped)
+        self.assertIn("drop unknown subtitle, no decoder or codec information",
+                      p.reasons)
+
     def test_keeping_the_source_container_copies_as_before(self):
         self.mode.output.container = "keep"
         p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", title="Stereo", default=1),
@@ -765,6 +775,16 @@ class TestVideoCopyFallback(Base):
 
 
 class TestArgs(Base):
+    def test_missing_input_timestamps_are_generated(self):
+        """Stream-copying old AVI video to Matroska still needs valid PTS."""
+        p = self.plan([V(0, "mpeg4", 352), A(1, "mp3", 2, "und")],
+                      path="/media/TV/episode.avi")
+        args = build_args(p, "/tmp/out.mkv")
+        self.assertIn("-fflags", args)
+        pos = args.index("-fflags")
+        self.assertEqual(args[pos + 1], "+genpts")
+        self.assertLess(pos, args.index("-i"))
+
     def test_every_output_stream_gets_an_explicit_codec(self):
         """No -c: means ffmpeg picks the container default (libx264 for mkv)."""
         p = self.plan([V(0, "h264", 1080), A(1, "eac3", 6, "eng", default=1),
