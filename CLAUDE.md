@@ -69,8 +69,9 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
   `Probe` dataclass is just `path + streams + fmt`, which is why tests can fabricate one.
 - `plan.py` — **pure**: `plan_file(probe, lib, cfg) -> FilePlan`. Audio is the part with
   the sharp edge: the stereo track is chosen by an explicit rule, not a score. A 2.0
-  track already in the file wins (re-encoded to AAC if it is not already, never kept
-  beside its own copy); failing that, the widest `downmix_channels` track in a
+  track already in the file wins (re-encoded to AAC only at a configured rate below
+  its known source rate, otherwise copied; never kept beside its own copy); failing
+  that, the widest `downmix_channels` track in a
   `preferred_languages` language is folded down, ties broken by bitrate then stream
   index. Anything with the `comment` or `visual_impaired` disposition, or a title
   matching `commentary_pattern`, is excluded — and if exclusion empties the candidate

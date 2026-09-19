@@ -60,11 +60,12 @@ class AudioCfg:
     stereo_encoder: str = "auto"
     stereo_codec: str = "aac"
     stereo_bitrate: str = "192k"
-    # A track that is already 2.0 but in the wrong codec is re-encoded, and
-    # its own bitrate says what it is worth spending on: lifting a 128k mp3 to
-    # 192k aac buys nothing but size. Source rates at or below the two
-    # thresholds get the matching target instead. Either threshold at "0"
-    # switches its band off; both off is a flat stereo_bitrate for everything.
+    # A track that is already 2.0 but in the wrong codec is re-encoded only at
+    # a rate below its source rate: lifting a 128k mp3 to 192k AAC buys nothing
+    # but size. Source rates at or below the two thresholds get the matching
+    # target; an equal rung steps down, while no safe rung or an unknown source
+    # rate leaves the original track copied. Either threshold at "0" switches
+    # its band off.
     stereo_bitrate_mid: str = "128k"
     stereo_bitrate_low: str = "96k"
     mid_max_source_bitrate: str = "160k"
@@ -439,7 +440,8 @@ MODE_META: dict[str, dict[str, Any]] = {
     "audio.add_stereo_downmix": {
         "desc": "Make sure the file ends up with an AAC 2.0 track, set default, "
                 "for players that handle surround badly. An existing stereo "
-                "track is re-used - converted to AAC if it is not already - "
+                "track is re-used - converted to AAC if a lower configured "
+                "bitrate makes it smaller, otherwise copied unchanged - "
                 "and only a file with none gets one folded down from its "
                 "surround mix. Off copies every track exactly as it arrived."},
     "audio.keep_stereo_only": {
@@ -476,8 +478,9 @@ MODE_META: dict[str, dict[str, Any]] = {
     "audio.stereo_bitrate": {
         "desc": "Bitrate for the stereo track. Every fold-down from a surround "
                 "mix gets this; a track that was already 2.0 gets it only when "
-                "its own bitrate is above both thresholds below, or when the "
-                "file does not record one."},
+                "it is below the source bitrate. Equal or larger choices step "
+                "down to a safe configured rung; if none exists, or the source "
+                "rate is unknown, the original stereo track is copied."},
     "audio.stereo_bitrate_mid": {
         "desc": "Bitrate for an existing 2.0 track whose own bitrate is at or "
                 "below mid_max_source_bitrate."},

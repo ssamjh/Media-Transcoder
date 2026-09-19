@@ -354,7 +354,7 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
         plan.reasons.append("name the stereo track")
         return a.stereo_title
 
-    def convert_bitrate(s: dict[str, Any]) -> str:
+    def convert_bitrate(s: dict[str, Any]) -> str | None:
         """What to spend re-encoding an existing 2.0 track to AAC.
 
         Only this path is laddered. A fold-down is judged by the configured
@@ -363,20 +363,40 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
         already carries the rate someone chose for exactly this mix, and
         re-encoding a 128k one at 192k buys size and no quality.
 
-        A rate the container does not record reads as 0, which must fall
-        through to the configured bitrate and not to the bottom of the
-        ladder: Matroska often omits it, and "unknown" is not "tiny".
+        Re-encoding at the same or a higher nominal bitrate cannot save
+        space and cannot restore quality already lost by the source codec.
+        If the selected rung would do that, use the highest configured rung
+        below the source instead.  When no such rung exists, or the container
+        does not record the source rate, return None so the original track is
+        copied: unknown is not permission to make the file larger.
         """
         source = bitrate_of(s)
         if source <= 0:
-            return a.stereo_bitrate
+            return None
         bands = ((a.low_max_source_bitrate, a.stereo_bitrate_low),
                  (a.mid_max_source_bitrate, a.stereo_bitrate_mid))
-        for threshold, target in bands:
+        target = a.stereo_bitrate
+        for threshold, band_target in bands:
             limit = parse_bitrate(threshold)
             if limit and source <= limit:
-                return target
-        return a.stereo_bitrate
+                target = band_target
+                break
+        target_rate = parse_bitrate(target) or 0
+        if 0 < target_rate < source:
+            return target
+
+        # The threshold-selected rung is equal to or above the source. Pick
+        # the best configured AAC rate that is actually smaller instead.
+        safer = {
+            rate: parsed for rate in (
+                a.stereo_bitrate_low,
+                a.stereo_bitrate_mid,
+                a.stereo_bitrate,
+            )
+            if (parsed := parse_bitrate(rate)) is not None
+            and 0 < parsed < source
+        }
+        return max(safer, key=safer.get) if safer else None
 
     if downmix is not None:
         extra = ["-ac:{i}", "2", "-b:{i}", a.stereo_bitrate]
@@ -405,25 +425,29 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
         if a.add_stereo_downmix and is_stereo(s) and not is_target_codec(s):
             # Already 2.0, wrong codec: transcoded in place. Keeping the
             # source track beside its own AAC copy would leave the file
-            # carrying the same mix twice.
+            # carrying the same mix twice. If no AAC rate can safely make it
+            # smaller, preserve the source below instead.
             bitrate = convert_bitrate(s)
-            plan.streams.append(StreamPlan(
-                s["index"], "audio", a.stereo_encoder,
-                extra=["-b:{i}", bitrate],
-                disposition=want(s, default),
-                title=a.stereo_title if default else None,
-                language=lang_of(s),
-                note=f"{codec_of(s)} stereo re-encoded",
-            ))
-            plan.reasons.append(
-                f"re-encode {codec_of(s)} stereo to {a.stereo_codec} "
-                f"{bitrate}")
-            continue
+            if bitrate is not None:
+                plan.streams.append(StreamPlan(
+                    s["index"], "audio", a.stereo_encoder,
+                    extra=["-b:{i}", bitrate],
+                    disposition=want(s, default),
+                    title=a.stereo_title if default else None,
+                    language=lang_of(s),
+                    note=f"{codec_of(s)} stereo re-encoded",
+                ))
+                plan.reasons.append(
+                    f"re-encode {codec_of(s)} stereo to {a.stereo_codec} "
+                    f"{bitrate}")
+                continue
         plan.streams.append(StreamPlan(
             s["index"], "audio", "copy",
             disposition=want(s, default) if a.add_stereo_downmix else None,
             title=stereo_name(s) if default else None,
-            note="stereo" if default else "kept",
+            note=(f"{codec_of(s)} stereo kept; AAC would not be smaller"
+                  if is_stereo(s) and not is_target_codec(s)
+                  else "stereo" if default else "kept"),
         ))
 
 

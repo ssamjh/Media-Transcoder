@@ -28,7 +28,7 @@ Each is independently switchable per library.
 | Stage | When enabled | When disabled |
 | --- | --- | --- |
 | **Video** | SD (≤576p) → x265 CRF 23, 720p → CRF 23, 1080p → CRF 22, each band with its own configurable CRF. Already-HEVC is copied, never re-encoded. Above 1200p left alone entirely. | Every video stream copied untouched, and the height ceiling no longer applies — a 4K file still gets its audio and subtitles cleaned. |
-| **Audio** | Every file ends up with an AAC 2.0 track, default, titled `Stereo` (`audio.stereo_title`). A track that is already 2.0 is used — re-encoded to AAC at 192k if it is not already — and only a file with none gets one folded down from its widest surround mix at 160k. `keep_stereo_only` then drops the other tracks; off (the default) keeps them all. Commentary and described audio are never folded down and never dropped. | Every audio track copied untouched, dispositions left alone. |
+| **Audio** | Every file gets a safe 2.0 default titled `Stereo` (`audio.stereo_title`). An existing stereo track is converted to AAC only at a configured bitrate below its known source rate; otherwise it is copied, avoiding a larger lossy transcode. A file with no stereo track gets AAC folded down from its widest surround mix at `audio.stereo_bitrate`. `keep_stereo_only` then drops the other tracks; off (the default) keeps them all. Commentary and described audio are never folded down and never dropped. | Every audio track copied untouched, dispositions left alone. |
 | **Subtitles** | Keeps configured languages only. If none match and there is exactly one *unlabelled* track, that one is kept. A text track the target container cannot carry — `mov_text` from an MP4, say — is converted to SubRip rather than copied, since Matroska refuses it at the muxer. | Every subtitle track copied, converted to SubRip if the container demands it. |
 | **Output** | Container normalised to MKV (or `keep` to leave the extension alone), cover art dropped, originals replaced once verified and inside the size window (30%–110% of the source by default). The 110% ceiling is only asked of a run that re-encoded the video; one rejected by it is rebuilt around the source video stream so the audio and subtitle work still lands. | — |
 | **Notifications** | Once the verified file is back in place, calls the URLs you list — Jellyfin, Plex, anything with an HTTP endpoint. Queued and delivered in the background. | Nothing is called. |
@@ -42,7 +42,10 @@ default track is a director talking over it — so the choice is explicit rather
 than scored:
 
 1. A 2.0 track already in the file wins. Folding the surround mix down when a
-   stereo mix exists is a second lossy generation for nothing.
+   stereo mix exists is a second lossy generation for nothing. If it is not
+   AAC, it is converted only when a configured AAC bitrate is below its known
+   source bitrate. A 192k AC-3 track therefore becomes 128k AAC; a source with
+   no safe lower rung, or no reported bitrate, is copied unchanged.
 2. Otherwise, candidates are tracks in `audio.preferred_languages` with a
    channel count in `audio.downmix_channels` (6 or 8). Anything carrying the
    `comment` or `visual_impaired` disposition, or a title matching

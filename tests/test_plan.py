@@ -350,7 +350,8 @@ class TestStereoConversion(Base):
     """A 2.0 track that is not AAC is transcoded, not kept beside a copy."""
 
     def test_non_aac_stereo_is_reencoded_in_place(self):
-        p = self.plan([V(0, "hevc"), A(1, "ac3", 2, "eng", default=1)])
+        p = self.plan([V(0, "hevc"),
+                       A(1, "ac3", 2, "eng", default=1, bitrate=448_000)])
         audio = self.kinds(p, "audio")
         self.assertEqual(len(audio), 1)                  # not both
         self.assertEqual(audio[0].codec, ENCODER)
@@ -363,14 +364,14 @@ class TestStereoConversion(Base):
     def test_it_is_preferred_over_folding_the_surround_mix_down(self):
         """Re-encoding a 2.0 mix beats a second lossy generation off the 5.1."""
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
-                       A(2, "ac3", 2, "eng")])
+                       A(2, "ac3", 2, "eng", bitrate=192_000)])
         audio = self.kinds(p, "audio")
         self.assertEqual(audio[0].src_index, 2)
         self.assertEqual(audio[0].codec, ENCODER)
         self.assertFalse(any("downmix" in r for r in p.reasons), p.reasons)
 
     def test_an_existing_aac_stereo_track_wins_over_another_stereo_codec(self):
-        p = self.plan([V(0, "hevc"), A(1, "ac3", 2, "eng"),
+        p = self.plan([V(0, "hevc"), A(1, "ac3", 2, "eng", bitrate=192_000),
                        A(2, "aac", 2, "eng", title="Stereo", default=1)])
         audio = self.kinds(p, "audio")
         chosen = next(s for s in audio if s.disposition == "default")
@@ -382,7 +383,7 @@ class TestStereoConversion(Base):
 
     def test_a_foreign_stereo_track_is_converted_but_not_promoted(self):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
-                       A(2, "ac3", 2, "fre")])
+                       A(2, "ac3", 2, "fre", bitrate=192_000)])
         french = next(s for s in self.kinds(p, "audio") if s.src_index == 2)
         self.assertEqual(french.codec, ENCODER)
         self.assertEqual(french.disposition, "0")
@@ -398,34 +399,41 @@ class TestStereoBitrateLadder(Base):
         stream = self.kinds(p, "audio")[0]
         return stream.extra[stream.extra.index("-b:{i}") + 1]
 
-    def test_a_thin_source_gets_the_low_band(self):
-        self.assertEqual(self.rate(96_000), "96k")
+    def test_a_source_equal_to_the_lowest_rung_is_copied(self):
+        p = self.plan([V(0, "hevc"),
+                       A(1, "ac3", 2, "eng", default=1, bitrate=96_000)])
+        self.assertEqual(self.kinds(p, "audio")[0].codec, "copy")
 
     def test_the_low_threshold_is_inclusive(self):
         self.assertEqual(self.rate(112_000), "96k")
 
     def test_a_middling_source_gets_the_mid_band(self):
-        self.assertEqual(self.rate(128_000), "128k")
+        self.assertEqual(self.rate(128_000), "96k")
 
     def test_the_mid_threshold_is_inclusive(self):
         self.assertEqual(self.rate(160_000), "128k")
 
+    def test_192k_ac3_steps_down_instead_of_growing(self):
+        self.assertEqual(self.rate(192_000), "128k")
+
     def test_a_fat_source_gets_the_configured_bitrate(self):
         self.assertEqual(self.rate(448_000), "192k")
 
-    def test_an_unrecorded_bitrate_falls_back_rather_than_down(self):
-        """Matroska often omits the rate, and unknown is not tiny."""
-        self.assertEqual(self.rate(None), "192k")
+    def test_an_unrecorded_bitrate_is_copied(self):
+        """Unknown cannot prove that an AAC transcode will be smaller."""
+        p = self.plan([V(0, "hevc"), A(1, "ac3", 2, "eng", default=1,
+                                       bitrate=None)])
+        self.assertEqual(self.kinds(p, "audio")[0].codec, "copy")
 
     def test_the_reason_names_the_rate_actually_chosen(self):
         p = self.plan([V(0, "hevc"),
                        A(1, "mp3", 2, "eng", default=1, bitrate=128_000)])
-        self.assertIn("re-encode mp3 stereo to aac 128k", p.reasons)
+        self.assertIn("re-encode mp3 stereo to aac 96k", p.reasons)
 
     def test_zeroed_thresholds_give_a_flat_bitrate(self):
         self.mode.audio.low_max_source_bitrate = "0"
         self.mode.audio.mid_max_source_bitrate = "0"
-        self.assertEqual(self.rate(96_000), "192k")
+        self.assertEqual(self.rate(256_000), "192k")
 
     def test_a_fold_down_is_not_laddered(self):
         """A 5.1 source rate says nothing about what its downmix needs."""
