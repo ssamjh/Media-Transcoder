@@ -364,6 +364,7 @@ The panel is a client of a plain JSON API.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
+| GET | `/health` | unauthenticated container liveness check |
 | GET | `/api/status` | counters, active jobs, queue, libraries, recent history |
 | GET | `/api/files` | `?status=&library=&q=&order=&limit=&offset=` |
 | GET | `/api/file` | `?path=` — state, plan and run history |

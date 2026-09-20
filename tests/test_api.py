@@ -582,6 +582,11 @@ class ApiKeyTest(unittest.TestCase):
         _, status = self.fetch("/api/status")
         self.assertEqual(status, 401)
 
+    def test_health_check_needs_no_key(self):
+        body, status = self.fetch("/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+
     def test_api_with_a_wrong_key_is_rejected(self):
         _, status = self.fetch("/api/status", {"X-Api-Key": "wrong"})
         self.assertEqual(status, 401)

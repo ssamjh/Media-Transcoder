@@ -145,6 +145,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
         route = urlparse(self.path).path.rstrip("/") or "/"
         try:
+            # Docker needs a credential-free liveness check. API routes may
+            # require a key, so probing /api/status would mark a working
+            # service unhealthy as soon as authentication is configured.
+            if route == "/health":
+                return self._json({"ok": True})
             if route == "/":
                 return self._static("index.html", "text/html; charset=utf-8")
             if route == "/app.css":
