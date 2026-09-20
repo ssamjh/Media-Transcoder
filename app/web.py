@@ -233,7 +233,6 @@ class Handler(BaseHTTPRequestHandler):
             handler = {
                 "/api/scan": self.api_scan,
                 "/api/check": self.api_check,
-                "/api/process": self.api_process,
                 "/api/cancel": self.api_cancel,
                 "/api/cancel-all": self.api_cancel_all,
                 "/api/queue-pending": self.api_queue_pending,
@@ -601,19 +600,6 @@ class Handler(BaseHTTPRequestHandler):
             known = ", ".join(m.id for m in self.engine.cfg.modes) or "none"
             raise ApiError(f"no such mode: {mode} (known modes: {known})")
         return mode
-
-    def api_process(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Queue one file. This is the endpoint Sonarr and Radarr call."""
-        path = _norm(body.get("path"))
-        mode = self._mode(body)
-        if not path:
-            raise ApiError("path is required")
-        try:
-            ok, message = self.engine.enqueue(
-                path, force=bool(body.get("force")), mode=mode)
-        except ConfigError as exc:
-            raise ApiError(str(exc)) from None
-        return {"ok": ok, "message": message, "path": path, "mode": mode or None}
 
     # --- native Sonarr/Radarr webhooks ----------------------------------
 

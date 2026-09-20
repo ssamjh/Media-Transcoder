@@ -1,8 +1,8 @@
 """Processing modes: the settings themselves, and the guarantees around them.
 
 A mode is everything that happens to a file. A library names the mode it is
-treated with, and a single /api/process call - the one Sonarr and Radarr make
-on import - can name a different one for that file only. Three properties
+treated with, and a Sonarr or Radarr integration can name a different one for
+an imported file only. Three properties
 matter:
 
   - a mode is shared, not copied. Two libraries pointing at one mode are

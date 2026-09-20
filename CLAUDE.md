@@ -182,11 +182,11 @@ from `profile.notify` (the resolved copy), and only on the success path after
 Global config (`workers`, `schedule`, `output.temp_dir`, `web`) is about *how the daemon
 runs*, not about what a file becomes.
 
-### One-shot modes
+### Import modes
 
-`/api/process` - the endpoint Sonarr and Radarr hit on import - takes an optional `mode`,
-applied to that one file instead of its library's. Two invariants make the one-shot
-semantics real, both in `engine._process_one`:
+Each Sonarr or Radarr integration can select a `mode`, applied to that imported
+file instead of its library's. Two invariants make the one-shot semantics real,
+both in `engine._process_one`:
 
 1. The named mode decides the **encode**, but the state written to the database is always
    the library's own verdict. After a mode run the result is re-planned under

@@ -214,17 +214,6 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(d["ok"])
 
-    def test_process_requires_an_existing_file(self):
-        d, status = self.post("/api/process", {"path": self.A})
-        self.assertEqual(status, 200)
-        self.assertFalse(d["ok"])          # tracked, but not on disk
-        self.assertIn("does not exist", d["message"])
-
-    def test_process_requires_a_path(self):
-        d, status = self.post("/api/process", {})
-        self.assertEqual(status, 400)
-        self.assertIn("path is required", d["error"])
-
     def test_retry_resets_failures(self):
         d, status = self.post("/api/retry")
         self.assertEqual(status, 200)
@@ -501,24 +490,6 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(tv["mode_name"], "Standard")
         self.assertTrue(tv["stages"]["video"])
 
-    def test_process_accepts_a_mode(self):
-        # No media behind the fixture, so it cannot actually queue - but the
-        # mode is accepted and echoed rather than rejected.
-        d, status = self.post("/api/process", {"path": self.A, "mode": "cleanup"})
-        self.assertEqual(status, 200)
-        self.assertEqual(d["mode"], "cleanup")
-
-    def test_process_rejects_an_unknown_mode(self):
-        d, status = self.post("/api/process", {"path": self.A, "mode": "nope"})
-        self.assertEqual(status, 400)
-        self.assertIn("no such mode", d["error"])
-        self.assertIn("cleanup", d["error"])
-
-    def test_process_without_a_mode_is_unchanged(self):
-        d, status = self.post("/api/process", {"path": self.A})
-        self.assertEqual(status, 200)
-        self.assertIsNone(d["mode"])
-
     def test_native_sonarr_webhook_extracts_ids_and_waits_for_enqueue(self):
         path = Path(self.tmp.name) / "media" / "TV" / "native.mkv"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -561,10 +532,6 @@ class ApiTest(unittest.TestCase):
         })
         self.assertEqual(status, 400)
         self.assertIn("series id", d["error"])
-
-    def test_process_requires_a_path_before_a_mode(self):
-        _, status = self.post("/api/process", {"mode": "cleanup"})
-        self.assertEqual(status, 400)
 
     def test_check_rejects_an_unknown_mode(self):
         _, status = self.post("/api/check", {"path": self.A, "mode": "nope"})
@@ -708,13 +675,13 @@ class ApiKeyTest(unittest.TestCase):
         self.assertEqual(status, 200)
 
     def test_posting_without_a_key_is_rejected(self):
-        _, status = self.fetch("/api/process", method="POST",
+        _, status = self.fetch("/api/check", method="POST",
                                headers={"Content-Type": "application/json"})
         self.assertEqual(status, 401)
 
     def test_posting_with_a_key_gets_past_auth(self):
         _, status = self.fetch(
-            "/api/process", method="POST",
+            "/api/check", method="POST",
             headers={"Content-Type": "application/json", "X-Api-Key": self.KEY})
         self.assertEqual(status, 400)      # rejected for the missing path, not the key
 

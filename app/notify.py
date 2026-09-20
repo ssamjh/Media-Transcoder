@@ -1,6 +1,6 @@
 """Outbound webhooks: tell other applications a file is finished.
 
-Sonarr or Radarr calls `/api/process` on import; when the encode has verified
+Sonarr or Radarr calls its native webhook endpoint on import; when the encode has verified
 and been copied back over the original, whatever else cares - Jellyfin, Plex,
 a notification service - gets a call of its own. Those calls are queued and
 delivered on a single background thread, so a mass import that finishes
@@ -222,7 +222,7 @@ def jellyfin_hooks(cfg: Any) -> list[Webhook]:
         return []
     return [Webhook(
         url=str(target.url).rstrip("/") + "/Library/Media/Updated",
-        headers={"X-Emby-Token": str(target.api_key)},
+        headers={"Authorization": f'MediaBrowser Token="{target.api_key}"'},
         timeout=float(target.timeout), retries=max(1, int(target.max_retries)),
     )]
 

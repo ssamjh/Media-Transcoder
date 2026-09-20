@@ -203,10 +203,9 @@ processing -> Jellyfin update -> complete
 - Test, Rename, Health and Grab events answer `ignored: true` and queue
   nothing.
 
-### One-shot modes
+### Import modes
 
-An integration profile, or a `POST /api/process` call, can name a **mode** for
-that file only:
+An integration profile can name a **mode** for its imported files:
 
 | `mode` | Result |
 | --- | --- |
@@ -217,20 +216,8 @@ that file only:
 It is never stored against the file, so the next scheduled scan plans it under
 its library's own mode again. An import using `cleanup` gets the cheap wins
 now and still queues for x265 later. An unknown mode is a 400, not a silent
-full re-encode.
-
-For simple setups that do not need Arr reconciliation, `POST /api/process`
-queues a single file and returns immediately:
-
-```sh
-#!/bin/sh
-# Sonarr: Settings > Connect > Custom Script, on Import and Upgrade.
-# Radarr: use $radarr_moviefile_path instead.
-curl -fsS -X POST http://transcoder:8080/api/process \
-  -H "X-Api-Key: $TRANSCODER_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{\"path\": \"$sonarr_episodefile_path\", \"mode\": \"cleanup\"}"
-```
+full re-encode. Imports are accepted only through the native Sonarr and Radarr
+webhook profiles, so every request gets durable tracking and retry handling.
 
 ### The API key
 
@@ -381,7 +368,6 @@ The panel is a client of a plain JSON API.
 | POST | `/api/modes/update` | `{"id": "cleanup", "updates": {...}}` |
 | POST | `/api/modes/delete` | `{"id": "cleanup"}` |
 | POST | `/api/check` | `{"path": "...", "mode": null}`, plan one file |
-| POST | `/api/process` | `{"path": "...", "mode": null, "force": false}` |
 | POST | `/api/webhook/sonarr/<id>` | native Arr import hook |
 | GET | `/api/integrations` | Arr profiles, Jellyfin, webhook URLs, schemas |
 | POST | `/api/integrations/add` | `{"provider": "sonarr", "name": "TV"}` |

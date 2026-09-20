@@ -192,8 +192,6 @@ async function openFile(path) {
         ${modes.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("")}
       </select>
       <button class="small" data-act="check">Re-check</button>
-      <button class="small primary" data-act="process">Process now</button>
-      <button class="small" data-act="force">Force retry</button>
       <button class="small danger" data-act="cancel">Cancel</button>
     </div>
     ${planHtml(f.plan)}`;
@@ -219,10 +217,6 @@ async function openFile(path) {
       const mode = el("d-mode")?.value || "";
       if (a === "check") {
         if (await act("/api/check", { path, mode }, "Checked")) openFile(path);
-      } else if (a === "process") {
-        if (await act("/api/process", { path, mode })) openFile(path);
-      } else if (a === "force") {
-        if (await act("/api/process", { path, mode, force: true })) openFile(path);
       } else if (a === "cancel") {
         if (await act("/api/cancel", { path })) openFile(path);
       }
@@ -760,7 +754,7 @@ function wireRows(root) {
     tr.addEventListener("click", () => openFile(tr.dataset.path)));
 }
 
-// One arbitrary path, planned or processed on demand. The file does not
+// One arbitrary path, planned on demand. The file does not
 // have to be tracked yet, so this reaches anything inside a library without
 // waiting for a scan to notice it.
 function openPathPrompt() {
@@ -777,7 +771,6 @@ function openPathPrompt() {
       <span class="hint">Applies to this run only.</span></div>
     <div class="toolbar" style="padding:0;margin:0">
       <button class="primary" id="p-check">Check</button>
-      <button id="p-process">Process now</button>
     </div>
   </div>`);
 
@@ -788,7 +781,6 @@ function openPathPrompt() {
     if (d) openFile(path);
   };
   el("p-check").addEventListener("click", () => run("/api/check"));
-  el("p-process").addEventListener("click", () => run("/api/process"));
 }
 
 el("btn-path").addEventListener("click", openPathPrompt);
@@ -827,7 +819,7 @@ async function loadFiles() {
   el("files").innerHTML = d.files.length ? `<table><thead><tr>
       <th>File</th><th>Library</th><th>Status</th><th class="num">Size</th>
       <th class="num">Res</th><th>Video</th><th>Work</th>
-      <th class="num">Checked</th><th></th>
+      <th class="num">Checked</th>
     </tr></thead><tbody>${d.files.map((f) => `
       <tr class="click" data-path="${esc(f.path)}">
         <td class="name">${esc(f.name || f.path)}</td>
@@ -838,19 +830,10 @@ async function loadFiles() {
         <td>${esc(f.video_codec || "—")}</td>
         <td class="muted">${esc((f.reasons || []).join("; ") || "—")}</td>
         <td class="num">${ago(f.last_checked, now)}</td>
-        <td class="actions">
-          <button class="small" data-go="${esc(f.path)}">Process</button>
-        </td>
       </tr>`).join("")}</tbody></table>`
     : '<div class="empty">No matching files</div>';
 
   wireRows(el("files"));
-  el("files").querySelectorAll("[data-go]").forEach((b) =>
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      act("/api/process", { path: b.dataset.go });
-    }));
-
   const from = d.total ? fOffset + 1 : 0;
   el("files-pager").innerHTML = `
     <button ${fOffset === 0 ? "disabled" : ""} id="f-prev">Previous</button>
@@ -1111,19 +1094,6 @@ el("m-add").addEventListener("click", () => {
 });
 
 function renderIntegration() {
-  const origin = location.origin;
-  const auth = KEY ? ` -H "X-Api-Key: ${KEY}"` : "";
-  const list = modes.map((m) => `<code>${esc(m.id)}</code>`).join(", ");
-  const nl = String.fromCharCode(10);
-  const script = [
-    "#!/bin/sh",
-    "# Sonarr: Settings > Connect > Custom Script, on Import and Upgrade.",
-    "# Radarr: use $radarr_moviefile_path instead.",
-    'curl -fsS -X POST ' + origin + '/api/process' + auth + " \\",
-    '  -H "Content-Type: application/json" \\',
-    '  -d "{\\"path\\": \\"$sonarr_episodefile_path\\", \\"mode\\": \\"cleanup\\"}"',
-  ].join(nl);
-
   el("integration").innerHTML = `
     <div class="sect">
       <h3>API key</h3>
@@ -1137,13 +1107,6 @@ function renderIntegration() {
           <input type="text" id="int-key" value="${esc(KEY || "(no key set)")}" readonly>
           <span class="hint">Change it under Settings &rarr; Web panel</span>
         </div>
-      </div>
-      <h3>Process a file on import</h3>
-      <div class="field">
-        <div><div class="desc">Queues one file. <code>mode</code> is optional and
-          applies to that run only. The next scheduled scan plans the file under
-          its library's normal profile again. Known modes: ${list}.</div></div>
-        <div class="ctl"><pre class="toml">${esc(script)}</pre></div>
       </div>
     </div>`;
 }

@@ -544,7 +544,7 @@ class JellyfinClient:
         request = urllib.request.Request(
             self.url, data=data, method="POST",
             headers={"Accept": "application/json", "Content-Type": "application/json",
-                     "X-Emby-Token": self.api_key})
+                     "Authorization": f'MediaBrowser Token="{self.api_key}"'})
         try:
             response = _open(self.opener, request, self.timeout)
             try:

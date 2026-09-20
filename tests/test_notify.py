@@ -181,7 +181,8 @@ class TestConfigSurface(unittest.TestCase):
         hooks = notify.jellyfin_hooks(self.cfg)
         self.assertEqual(hooks[0].url,
                          "http://jellyfin:8096/Library/Media/Updated")
-        self.assertEqual(hooks[0].headers["X-Emby-Token"], "key")
+        self.assertEqual(hooks[0].headers["Authorization"],
+                         'MediaBrowser Token="key"')
         self.assertEqual(notify.jellyfin_payload("/media/a.mkv"), {
             "Updates": [{"Path": "/media/a.mkv", "UpdateType": "Modified"}]})
 

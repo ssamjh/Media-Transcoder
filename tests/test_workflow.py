@@ -123,7 +123,7 @@ class WorkflowTest(unittest.TestCase):
             self.assertTrue(self.workflow.drain_once())
 
         arr.assert_not_called()
-        jellyfin.update.assert_called_once_with(final)
+        jellyfin.update.assert_called_once_with(final, update_type="Created")
         done = self.db.get_job(job["id"])
         self.assertEqual(done["status"], "done")
         self.assertEqual(done["stage"], "complete")
@@ -144,7 +144,7 @@ class WorkflowTest(unittest.TestCase):
             self.assertTrue(self.workflow.drain_once())
 
         arr.assert_not_called()
-        jellyfin.update.assert_called_once_with(path)
+        jellyfin.update.assert_called_once_with(path, update_type="Created")
         self.assertEqual(self.db.get_job(job["id"])["status"], "done")
 
     def test_failed_api_job_still_notifies_jellyfin_and_stays_failed(self):
@@ -162,13 +162,13 @@ class WorkflowTest(unittest.TestCase):
                         return_value=jellyfin):
             self.assertTrue(self.workflow.drain_once())
 
-        jellyfin.update.assert_called_once_with(path)
+        jellyfin.update.assert_called_once_with(path, update_type="Created")
         failed = self.db.get_job(job["id"])
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["stage"], "processing")
         self.assertEqual(failed["error"], "ffmpeg failed")
 
-    def test_exhausted_delivery_is_failed_without_reencoding(self):
+    def test_jellyfin_delivery_retries_forever_without_reencoding(self):
         self.cfg.integrations.autopulse.max_retries = 1
         job, _ = self.accept()
         self.workflow.claim(job["id"])
@@ -181,17 +181,15 @@ class WorkflowTest(unittest.TestCase):
                         return_value=jellyfin):
             self.assertTrue(self.workflow.drain_once())
 
-        failed = self.db.get_job(job["id"])
-        self.assertEqual(failed["status"], "failed")
-        self.assertEqual(failed["stage"], "jellyfin")
+        waiting = self.db.get_job(job["id"])
+        self.assertEqual(waiting["status"], "waiting")
+        self.assertEqual(waiting["stage"], "jellyfin")
+        self.assertEqual(waiting["error"], "offline")
         self.assertEqual(len(self.db.list_jobs()), 1)
-
-        engine = Engine(self.cfg, self.db)
-        self.assertEqual(engine.retry_workflow(job["id"]), 1)
-        self.assertEqual(self.db.get_job(job["id"])["status"], "waiting")
-        self.assertEqual(self.db.get_outbox(
-            dedupe_key=job["dedupe_key"], action="jellyfin")["status"],
-            "pending")
+        outbox = self.db.get_outbox(
+            dedupe_key=job["dedupe_key"], action="jellyfin")
+        self.assertEqual(outbox["status"], "pending")
+        self.assertIsNotNone(outbox["next_attempt"])
 
 
 if __name__ == "__main__":

@@ -161,7 +161,8 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(seen["url"],
                          "http://jellyfin:8096/Library/Media/Updated")
         self.assertEqual(seen["method"], "POST")
-        self.assertEqual(seen["headers"]["X-emby-token"], "secret")
+        self.assertEqual(seen["headers"]["Authorization"],
+                         'MediaBrowser Token="secret"')
         self.assertEqual(seen["body"], {"Updates": [{
             "Path": "/media/Film.mkv", "UpdateType": "Modified"}]})
 

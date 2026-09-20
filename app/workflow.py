@@ -167,6 +167,7 @@ class Workflow:
             "file_id": metadata.get("file_id"),
             "original_path": job["source_path"],
             "final_path": final_path,
+            "update_type": "Created",
         }
         self.db.transition_job_to_outbox(
             job_id, stage=stage, final_path=final_path,
@@ -191,6 +192,7 @@ class Workflow:
             "original_path": job["source_path"],
             "final_path": job["source_path"],
             "processing_error": error,
+            "update_type": "Created",
         }
         self.db.transition_job_to_outbox(
             job_id, stage="jellyfin", final_path=job["source_path"],
@@ -225,7 +227,8 @@ class Workflow:
                     self._complete_job(row["job_id"], final_path)
             elif row["action"] in {"jellyfin", "autopulse"}:
                 self._send_jellyfin(str(payload["final_path"]),
-                                     payload.get("provider"))
+                                     payload.get("provider"),
+                                     str(payload.get("update_type") or "Created"))
                 processing_error = str(payload.get("processing_error") or "")
                 if processing_error:
                     job = self.db.finish_job(
@@ -279,7 +282,8 @@ class Workflow:
             final_path=payload.get("final_path"))
         return result.final_path
 
-    def _send_jellyfin(self, path: str, provider: str | None = None) -> None:
+    def _send_jellyfin(self, path: str, provider: str | None = None,
+                       update_type: str = "Created") -> None:
         cfg = self.cfg.integrations.jellyfin
         if not _value(cfg, "url", ""):
             raise integrations.IntegrationError("Jellyfin url is not configured")
@@ -287,13 +291,16 @@ class Workflow:
             raise integrations.IntegrationError("Jellyfin api_key is not configured")
         integrations.JellyfinClient(
             cfg.url, cfg.api_key,
-            timeout=float(_value(cfg, "timeout", 15))).update(path)
+            timeout=float(_value(cfg, "timeout", 15))).update(
+                path, update_type=update_type)
+        log.info("Jellyfin accepted %s notification for %s", update_type, path)
 
     def _retry_or_fail(self, row: Any, exc: Exception) -> None:
         limit = self._retry_limit(row)
         attempts = int(row["retries"] or 0)
         message = str(exc) or exc.__class__.__name__
-        if attempts >= limit:
+        durable_jellyfin = row["action"] in {"jellyfin", "autopulse"}
+        if not durable_jellyfin and attempts >= limit:
             self.db.fail_outbox(row["id"], message)
             job = self.db.update_job(
                 row["job_id"], stage=row["action"], status="failed",
@@ -307,6 +314,13 @@ class Workflow:
         delay = min(3600.0, 5.0 * (2 ** max(0, attempts - 1)))
         self.db.fail_outbox(row["id"], message,
                             next_attempt=time.time() + delay)
+        if durable_jellyfin:
+            job = self.db.update_job(
+                row["job_id"], stage="jellyfin", status="waiting",
+                error=message)
+            if job is not None:
+                self._update_import(job, stage="jellyfin", status="waiting",
+                                    error=message)
         log.warning("%s failed for job %s: %s; retrying in %.0fs",
                     row["action"], row["job_id"], message, delay)
 

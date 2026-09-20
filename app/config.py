@@ -171,7 +171,7 @@ class ModeCfg:
     One mode says everything about what a run does to a file: which video it
     re-encodes, how audio and subtitles are cleaned, what container comes
     out, and who gets told afterwards. A library names the mode it uses, and
-    a single /api/process call can name a different one for that file only -
+    a Sonarr or Radarr integration can name a different one for an import -
     which is how an import hook does less work than a scheduled scan without
     a second copy of the settings existing anywhere.
     """
@@ -1514,9 +1514,9 @@ def dump_toml(cfg: Config) -> str:
         out.append("# Processing modes")
         out.append("#")
         out.append("# A mode is everything that happens to a file. A library")
-        out.append("# names the mode it is treated with, and a single")
-        out.append("# /api/process call can name a different one for that")
-        out.append("# file only - which is how an import hook does less work")
+        out.append("# names the mode it is treated with. A Sonarr or Radarr")
+        out.append("# integration can name a different one for an import,")
+        out.append("# which is how an import hook does less work")
         out.append("# than a scheduled scan without a second copy of these")
         out.append("# settings existing anywhere.")
         out.append("# " + "-" * 70)
