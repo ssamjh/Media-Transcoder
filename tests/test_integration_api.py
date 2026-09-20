@@ -1,4 +1,4 @@
-"""Managing Sonarr/Radarr profiles and AutoPulse from the panel.
+"""Managing Sonarr/Radarr profiles and Jellyfin from the panel.
 
 These drive the same endpoints the Integrations tab calls, against a real
 server on an ephemeral port. No worker threads, no outbound HTTP: the one
@@ -76,7 +76,7 @@ class IntegrationApiTest(unittest.TestCase):
         d, _ = self.get("/api/integrations")
         self.assertEqual(d["sonarr"], [])
         self.assertEqual(d["radarr"], [])
-        self.assertFalse(d["autopulse"]["enabled"])
+        self.assertFalse(d["jellyfin"]["enabled"])
         self.assertIn("standard", [m["id"] for m in d["modes"]])
 
     def test_added_profile_reports_its_webhook_url(self):
@@ -183,39 +183,44 @@ class IntegrationApiTest(unittest.TestCase):
         self.assertEqual([c["id"] for c in d["sonarr"]],
                          ["radarr-hd", "radarr-hd-2"])
 
-    # --- autopulse --------------------------------------------------------
+    # --- jellyfin ---------------------------------------------------------
 
-    def test_autopulse_can_be_configured_from_the_panel(self):
-        d, status = self.post("/api/integrations/autopulse", {"updates": {
+    def test_jellyfin_can_be_configured_from_the_panel(self):
+        d, status = self.post("/api/integrations/jellyfin", {"updates": {
             "enabled": True, "url": "http://jellyfin:8096",
             "api_key": "jellyfin-key"}})
         self.assertEqual(status, 200)
-        self.assertTrue(d["autopulse"]["enabled"])
-        self.assertEqual(d["autopulse"]["url"], "http://jellyfin:8096")
-        self.assertIn("[integrations.autopulse]",
+        self.assertTrue(d["jellyfin"]["enabled"])
+        self.assertEqual(d["jellyfin"]["url"], "http://jellyfin:8096")
+        self.assertIn("[integrations.jellyfin]",
                       self.config_path.read_text(encoding="utf-8"))
 
-    def test_autopulse_rejects_a_url_without_a_scheme(self):
-        self.post("/api/integrations/autopulse",
+    def test_jellyfin_rejects_a_url_without_a_scheme(self):
+        self.post("/api/integrations/jellyfin",
                   {"updates": {"url": "http://jellyfin:8096"}})
-        d, status = self.post("/api/integrations/autopulse",
-                              {"updates": {"url": "autopulse:2875"}})
+        d, status = self.post("/api/integrations/jellyfin",
+                              {"updates": {"url": "jellyfin:8096"}})
         self.assertEqual(status, 400)
         self.assertIn("http://", d["error"])
         live, _ = self.get("/api/integrations")
-        self.assertEqual(live["autopulse"]["url"], "http://jellyfin:8096")
+        self.assertEqual(live["jellyfin"]["url"], "http://jellyfin:8096")
 
-    def test_enabling_autopulse_without_a_url_is_refused(self):
-        _, status = self.post("/api/integrations/autopulse",
+    def test_enabling_jellyfin_without_a_url_is_refused(self):
+        _, status = self.post("/api/integrations/jellyfin",
                               {"updates": {"enabled": True}})
         self.assertEqual(status, 400)
 
     def test_jellyfin_api_key_is_marked_secret(self):
         d, _ = self.get("/api/integrations")
         fields = {f["key"]: f
-                  for b in d["autopulse"]["schema"] for f in b["fields"]}
+                  for b in d["jellyfin"]["schema"] for f in b["fields"]}
         self.assertTrue(fields["api_key"]["secret"])
         self.assertFalse(fields["api_key"]["readonly"])
+        self.assertNotIn("trigger_endpoint", fields)
+        self.assertNotIn("sonarr_endpoint", fields)
+        self.assertNotIn("radarr_endpoint", fields)
+        self.assertNotIn("username", fields)
+        self.assertNotIn("password", fields)
 
     # --- test button ------------------------------------------------------
 
@@ -239,16 +244,16 @@ class IntegrationApiTest(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn("TV Sonarr", d["error"])
 
-    def test_testing_autopulse_needs_a_url(self):
+    def test_testing_jellyfin_needs_a_url(self):
         _, status = self.post("/api/integrations/test",
-                              {"provider": "autopulse"})
+                              {"provider": "jellyfin"})
         self.assertEqual(status, 400)
 
-        self.post("/api/integrations/autopulse",
+        self.post("/api/integrations/jellyfin",
                   {"updates": {"url": "http://jellyfin:8096",
                                "api_key": "jellyfin-key"}})
         d, status = self.post("/api/integrations/test",
-                              {"provider": "autopulse"})
+                              {"provider": "jellyfin"})
         self.assertEqual(status, 200)
         self.assertIn("/Library/Media/Updated", d["message"])
 

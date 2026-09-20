@@ -155,7 +155,7 @@ class Workflow:
             return
         metadata = loads(job["source_metadata"], {})
         provider = str(job["source_provider"] or "")
-        if not self._autopulse_enabled():
+        if not self._jellyfin_enabled():
             self._complete_job(job_id, final_path)
             return
         action = "jellyfin"
@@ -174,10 +174,30 @@ class Workflow:
         self._wake.set()
 
     def processing_failed(self, job_id: int, error: str) -> None:
-        job = self.db.finish_job(job_id, "failed", error=error)
-        if job is not None:
-            self._update_import(job, stage="processing", status="failed",
-                                error=error)
+        job = self.db.get_job(job_id)
+        if job is None:
+            return
+        if not self._jellyfin_enabled():
+            job = self.db.finish_job(job_id, "failed", error=error)
+            if job is not None:
+                self._update_import(job, stage="processing", status="failed",
+                                    error=error)
+            return
+        # API submissions always announce their path, even when processing
+        # failed. Preserve the processing failure in the payload so a
+        # successful Jellyfin call cannot turn this job into a success.
+        payload = {
+            "provider": str(job["source_provider"] or ""),
+            "original_path": job["source_path"],
+            "final_path": job["source_path"],
+            "processing_error": error,
+        }
+        self.db.transition_job_to_outbox(
+            job_id, stage="jellyfin", final_path=job["source_path"],
+            action="jellyfin", payload=payload)
+        self._update_import(job, stage="jellyfin", status="waiting",
+                            final_path=job["source_path"], error=error)
+        self._wake.set()
 
     # --- outbox ---------------------------------------------------------
 
@@ -191,22 +211,34 @@ class Workflow:
                 final_path = self._reconcile(payload)
                 job = self.db.update_job(
                     row["job_id"], final_path=final_path,
-                    stage="autopulse" if self._autopulse_enabled() else "complete",
-                    status="waiting" if self._autopulse_enabled() else "done")
-                if self._autopulse_enabled():
+                    stage="jellyfin" if self._jellyfin_enabled() else "complete",
+                    status="waiting" if self._jellyfin_enabled() else "done")
+                if self._jellyfin_enabled():
                     next_payload = dict(payload, final_path=final_path)
                     self.db.enqueue_outbox(
-                        row["dedupe_key"], "autopulse", next_payload,
+                        row["dedupe_key"], "jellyfin", next_payload,
                         job_id=row["job_id"])
                     if job is not None:
                         self._update_import(job, final_path=final_path,
-                                            stage="autopulse", status="waiting")
+                                            stage="jellyfin", status="waiting")
                 else:
                     self._complete_job(row["job_id"], final_path)
             elif row["action"] in {"jellyfin", "autopulse"}:
                 self._send_jellyfin(str(payload["final_path"]),
                                      payload.get("provider"))
-                self._complete_job(row["job_id"], str(payload["final_path"]))
+                processing_error = str(payload.get("processing_error") or "")
+                if processing_error:
+                    job = self.db.finish_job(
+                        row["job_id"], "failed", error=processing_error,
+                        final_path=str(payload["final_path"]))
+                    if job is not None:
+                        self.db.update_job(row["job_id"], stage="processing")
+                        self._update_import(
+                            job, stage="processing", status="failed",
+                            final_path=str(payload["final_path"]),
+                            error=processing_error)
+                else:
+                    self._complete_job(row["job_id"], str(payload["final_path"]))
             else:
                 raise integrations.IntegrationError(
                     f"unknown outbox action: {row['action']}")
@@ -248,7 +280,7 @@ class Workflow:
         return result.final_path
 
     def _send_jellyfin(self, path: str, provider: str | None = None) -> None:
-        cfg = self.cfg.integrations.autopulse
+        cfg = self.cfg.integrations.jellyfin
         if not _value(cfg, "url", ""):
             raise integrations.IntegrationError("Jellyfin url is not configured")
         if not _value(cfg, "api_key", ""):
@@ -280,7 +312,7 @@ class Workflow:
 
     def _retry_limit(self, row: Any) -> int:
         if row["action"] in {"jellyfin", "autopulse"}:
-            return max(1, int(_value(self.cfg.integrations.autopulse,
+            return max(1, int(_value(self.cfg.integrations.jellyfin,
                                      "max_retries", 5)))
         payload = loads(row["payload"], {})
         cfg = self._arr_instance(payload.get("provider", ""),
@@ -300,8 +332,8 @@ class Workflow:
                          or i.name.casefold() == wanted), None)
         return candidates[0] if len(candidates) == 1 else None
 
-    def _autopulse_enabled(self) -> bool:
-        cfg = self.cfg.integrations.autopulse
+    def _jellyfin_enabled(self) -> bool:
+        cfg = self.cfg.integrations.jellyfin
         return bool(cfg.enabled and str(cfg.url).strip())
 
     def _complete_job(self, job_id: int, final_path: str) -> None:

@@ -147,43 +147,28 @@ class TestRoundTrip(unittest.TestCase):
             api_key="arr-key", path_from="/media", path_to="/library",
             request_timeout=12.0, command_timeout=45.0, poll_interval=1.5,
             max_retries=4, secret="webhook-secret")]
-        c.integrations.autopulse = cfgmod.AutoPulseCfg(
-            enabled=True, url="http://autopulse", username="u",
-            password="p", api_key="jellyfin-key", trigger_endpoint="/triggers/manual",
-            sonarr_endpoint="/triggers/sonarr",
-            radarr_endpoint="/triggers/radarr", max_retries=5)
+        c.integrations.jellyfin = cfgmod.JellyfinCfg(
+            enabled=True, url="http://jellyfin:8096",
+            api_key="jellyfin-key", max_retries=5)
         back = cfgmod.loads(cfgmod.dump_toml(c))
         self.assertEqual(back, c)
         redacted = cfgmod.integration_schema(c)
         self.assertTrue(redacted["sonarr"][0]["api_key_configured"])
         self.assertNotIn("arr-key", str(redacted))
-        self.assertTrue(redacted["autopulse"]["password_configured"])
-        self.assertNotIn("p", redacted["autopulse"])
+        self.assertTrue(redacted["jellyfin"]["api_key_configured"])
 
-
-class TestAutoPulseEndpoints(unittest.TestCase):
-    def cfg(self, **kwargs):
-        c = Config()
-        c.integrations.autopulse = cfgmod.AutoPulseCfg(
-            enabled=True, url="http://autopulse:2875", **kwargs)
-        return c
-
-    def test_an_unset_override_uses_the_shared_trigger(self):
-        auto = self.cfg(sonarr_endpoint="/triggers/sonarr").integrations.autopulse
-        self.assertEqual(auto.endpoint_for("sonarr"), "/triggers/sonarr")
-        self.assertEqual(auto.endpoint_for("radarr"), "/triggers/manual")
-        self.assertEqual(auto.endpoint_for(None), "/triggers/manual")
-        self.assertEqual(auto.endpoint_for("nonsense"), "/triggers/manual")
-
-    def test_an_override_without_a_leading_slash_is_refused(self):
-        """Caught in the panel, not at 3am when the hook fires."""
-        c = self.cfg(radarr_endpoint="/triggers/radarr")
-        with self.assertRaises(ConfigError):
-            cfgmod.apply_autopulse_updates(
-                c, {"radarr_endpoint": "triggers/radarr"})
-        # apply_autopulse_updates is transactional: the good value survives.
-        self.assertEqual(c.integrations.autopulse.radarr_endpoint,
-                         "/triggers/radarr")
+    def test_old_autopulse_section_migrates_and_is_not_written_back(self):
+        cfg = cfgmod.loads("""
+[integrations.autopulse]
+enabled = true
+url = "http://jellyfin:8096"
+api_key = "key"
+trigger_endpoint = "/triggers/manual"
+""")
+        self.assertTrue(cfg.integrations.jellyfin.enabled)
+        text = cfgmod.dump_toml(cfg)
+        self.assertIn("[integrations.jellyfin]", text)
+        self.assertNotIn("[integrations.autopulse]", text)
 
 
 class TestLibraries(unittest.TestCase):

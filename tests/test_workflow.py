@@ -147,6 +147,27 @@ class WorkflowTest(unittest.TestCase):
         jellyfin.update.assert_called_once_with(path)
         self.assertEqual(self.db.get_job(job["id"])["status"], "done")
 
+    def test_failed_api_job_still_notifies_jellyfin_and_stays_failed(self):
+        job, _ = self.accept()
+        self.workflow.claim(job["id"])
+        path = "/media/TV/Show/episode.mkv"
+
+        self.workflow.processing_failed(job["id"], "ffmpeg failed")
+        outbox = self.db.get_outbox(
+            dedupe_key=job["dedupe_key"], action="jellyfin")
+        self.assertIsNotNone(outbox)
+
+        jellyfin = mock.Mock()
+        with mock.patch("app.workflow.integrations.JellyfinClient",
+                        return_value=jellyfin):
+            self.assertTrue(self.workflow.drain_once())
+
+        jellyfin.update.assert_called_once_with(path)
+        failed = self.db.get_job(job["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["stage"], "processing")
+        self.assertEqual(failed["error"], "ffmpeg failed")
+
     def test_exhausted_delivery_is_failed_without_reencoding(self):
         self.cfg.integrations.autopulse.max_retries = 1
         job, _ = self.accept()

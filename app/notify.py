@@ -217,7 +217,7 @@ def hooks_for(notify: Any) -> list[Webhook]:
 
 def jellyfin_hooks(cfg: Any) -> list[Webhook]:
     """Build the direct Jellyfin update hook used by non-import/manual work."""
-    target = getattr(getattr(cfg, "integrations", None), "autopulse", None)
+    target = getattr(getattr(cfg, "integrations", None), "jellyfin", None)
     if not target or not target.enabled or not str(target.url).strip() or not target.api_key:
         return []
     return [Webhook(

@@ -16,7 +16,7 @@ download client and the Arr leaves the Arr with no settled, managed file to
 identify. Don't.
 
 Order of work below: containers → libraries and modes → integration
-profiles → Arr webhooks → AutoPulse → Jellyfin → verify. Everything from
+profiles → Arr webhooks → Jellyfin → verify. Everything from
 step 3 on is done in the panel's **Integrations** tab; the config file it
 writes is shown at the end of step 5 for anyone who prefers it.
 
@@ -217,7 +217,7 @@ mode = "cleanup"
 url = "http://radarr:7878"
 api_key = "radarr-api-key"
 
-[integrations.autopulse]
+[integrations.jellyfin]
 enabled = true
 url = "http://jellyfin:8096"
 api_key = "jellyfin-api-key"
@@ -340,7 +340,7 @@ mode = "cleanup"
 url = "http://radarr:7878"
 api_key = "..."
 
-[integrations.autopulse]
+[integrations.jellyfin]
 enabled = true
 url = "http://autopulse:2875"
 username = "..."

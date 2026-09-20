@@ -310,12 +310,13 @@ class ArrInstanceCfg:
 
 
 @dataclass
-class AutoPulseCfg:
-    """Optional outbound AutoPulse target for integration consumers."""
+class JellyfinCfg:
+    """Target for Jellyfin's path-specific media update API."""
 
     enabled: bool = False
     url: str = ""
     api_key: str = ""
+    # Accepted in memory only so older callers can be upgraded cleanly.
     username: str = ""
     password: str = ""
     trigger_endpoint: str = "/triggers/manual"
@@ -324,24 +325,27 @@ class AutoPulseCfg:
     timeout: float = 15.0
     max_retries: int = 3
 
-    def endpoint_for(self, provider: str | None) -> str:
-        """Which trigger a file's origin should be announced to.
 
-        AutoPulse installs commonly expose one named trigger per Arr rather
-        than a single manual one. An unset override falls back to
-        `trigger_endpoint`, so a single-trigger install is unaffected.
-        """
-        override = getattr(self, f"{str(provider or '').strip().lower()}_endpoint", "")
-        return override or self.trigger_endpoint
+# Import compatibility for callers which constructed the old type directly.
+AutoPulseCfg = JellyfinCfg
 
 
 @dataclass
 class IntegrationsCfg:
-    """Named inbound Arr profiles and an optional AutoPulse destination."""
+    """Named inbound Arr profiles and an optional Jellyfin destination."""
 
     sonarr: list[ArrInstanceCfg] = field(default_factory=list)
     radarr: list[ArrInstanceCfg] = field(default_factory=list)
-    autopulse: AutoPulseCfg = field(default_factory=AutoPulseCfg)
+    jellyfin: JellyfinCfg = field(default_factory=JellyfinCfg)
+
+    @property
+    def autopulse(self) -> JellyfinCfg:
+        """Deprecated in-process alias; never exposed or serialized."""
+        return self.jellyfin
+
+    @autopulse.setter
+    def autopulse(self, value: JellyfinCfg) -> None:
+        self.jellyfin = value
 
     def instances(self, provider: str) -> list[ArrInstanceCfg]:
         return getattr(self, str(provider).strip().lower(), [])
@@ -523,9 +527,9 @@ ARR_META: dict[str, dict[str, Any]] = {
                "secret": True},
 }
 
-AUTOPULSE_SECTIONS: dict[str, str] = {"": "Jellyfin"}
+JELLYFIN_SECTIONS: dict[str, str] = {"": "Jellyfin"}
 
-AUTOPULSE_META: dict[str, dict[str, Any]] = {
+JELLYFIN_META: dict[str, dict[str, Any]] = {
     "enabled": {"desc": "Tell Jellyfin about the final path once the file is "
                         "processed and the Arr has renamed it. Off means the "
                         "workflow finishes after the Arr reconciliation."},
@@ -803,17 +807,12 @@ def integration_schema(cfg: Config) -> dict[str, Any]:
             }
             for i in cfg.integrations.instances(provider)
         ]
-    auto = cfg.integrations.autopulse
-    out["autopulse"] = {
+    auto = cfg.integrations.jellyfin
+    out["jellyfin"] = {
         "enabled": auto.enabled,
         "url": auto.url,
-        "username": auto.username,
-        "trigger_endpoint": auto.trigger_endpoint,
-        "sonarr_endpoint": auto.sonarr_endpoint,
-        "radarr_endpoint": auto.radarr_endpoint,
         "max_retries": auto.max_retries,
         "api_key_configured": bool(auto.api_key),
-        "password_configured": bool(auto.password),
         "timeout": auto.timeout,
     }
     return out
@@ -841,12 +840,15 @@ def arr_schema(instance: ArrInstanceCfg,
     return out
 
 
-def autopulse_schema(cfg: Config) -> list[dict[str, Any]]:
-    """Describe the single AutoPulse destination."""
+def jellyfin_schema(cfg: Config) -> list[dict[str, Any]]:
+    """Describe the Jellyfin destination."""
     out = []
-    for section, title in AUTOPULSE_SECTIONS.items():
-        holder = cfg.integrations.autopulse
-        entries = _describe(holder, section, AUTOPULSE_META)
+    for section, title in JELLYFIN_SECTIONS.items():
+        holder = cfg.integrations.jellyfin
+        entries = _describe(
+            holder, section, JELLYFIN_META,
+            skip=("username", "password", "trigger_endpoint",
+                  "sonarr_endpoint", "radarr_endpoint"))
         if entries:
             out.append({"section": section, "title": title, "fields": entries})
     return out
@@ -1060,24 +1062,19 @@ def _validate_global(cfg: Config) -> None:
                 raise ConfigError(
                     f"{provider} integration {instance.id} names mode "
                     f"{instance.mode!r}, which does not exist")
-    if not (0.5 <= cfg.integrations.autopulse.timeout <= 300):
-        raise ConfigError("integrations.autopulse.timeout must be between "
+    if not (0.5 <= cfg.integrations.jellyfin.timeout <= 300):
+        raise ConfigError("integrations.jellyfin.timeout must be between "
                           "0.5 and 300")
-    if not (0 <= cfg.integrations.autopulse.max_retries <= 10):
-        raise ConfigError("integrations.autopulse.max_retries must be between "
+    if not (0 <= cfg.integrations.jellyfin.max_retries <= 10):
+        raise ConfigError("integrations.jellyfin.max_retries must be between "
                           "0 and 10")
-    auto = cfg.integrations.autopulse
+    auto = cfg.integrations.jellyfin
     if auto.enabled and not auto.url.strip():
-        raise ConfigError("integrations.autopulse.url is required when enabled")
+        raise ConfigError("integrations.jellyfin.url is required when enabled")
     if auto.enabled and not auto.api_key.strip():
-        raise ConfigError("integrations.autopulse.api_key is required when enabled")
+        raise ConfigError("integrations.jellyfin.api_key is required when enabled")
     if auto.url and not auto.url.lower().startswith(("http://", "https://")):
-        raise ConfigError("integrations.autopulse.url must start with http:// or https://")
-    for field_name in ("trigger_endpoint", "sonarr_endpoint", "radarr_endpoint"):
-        value = getattr(auto, field_name)
-        if value and not value.startswith("/"):
-            raise ConfigError(
-                f"integrations.autopulse.{field_name} must start with /")
+        raise ConfigError("integrations.jellyfin.url must start with http:// or https://")
     for provider in ("sonarr", "radarr"):
         for instance in cfg.integrations.instances(provider):
             if bool(instance.path_from) != bool(instance.path_to):
@@ -1298,12 +1295,12 @@ def apply_arr_updates(cfg: Config, instance: ArrInstanceCfg,
     )
 
 
-def apply_autopulse_updates(cfg: Config,
-                            updates: dict[str, Any]) -> list[str]:
-    auto = cfg.integrations.autopulse
+def apply_jellyfin_updates(cfg: Config,
+                           updates: dict[str, Any]) -> list[str]:
+    auto = cfg.integrations.jellyfin
     return _transactional(
         auto,
-        lambda: _apply(auto, updates, AUTOPULSE_META),
+        lambda: _apply(auto, updates, JELLYFIN_META),
         lambda: _validate_global(cfg),
     )
 
@@ -1468,18 +1465,13 @@ def dump_toml(cfg: Config) -> str:
                 f"max_retries = {_fmt(instance.max_retries)}",
                 f"secret = {_fmt(instance.secret)}",
             ])
-    auto = cfg.integrations.autopulse
+    auto = cfg.integrations.jellyfin
     out.extend([
         "",
-        "[integrations.autopulse]",
+        "[integrations.jellyfin]",
         f"enabled = {_fmt(auto.enabled)}",
         f"url = {_fmt(auto.url)}",
         f"api_key = {_fmt(auto.api_key)}",
-        f"username = {_fmt(auto.username)}",
-        f"password = {_fmt(auto.password)}",
-        f"trigger_endpoint = {_fmt(auto.trigger_endpoint)}",
-        f"sonarr_endpoint = {_fmt(auto.sonarr_endpoint)}",
-        f"radarr_endpoint = {_fmt(auto.radarr_endpoint)}",
         f"timeout = {_fmt(auto.timeout)}",
         f"max_retries = {_fmt(auto.max_retries)}",
     ])
@@ -1685,16 +1677,23 @@ def _from_dict(data: dict[str, Any]) -> Config:
     if raw_integrations is not None:
         if not isinstance(raw_integrations, dict):
             raise ConfigError("integrations must be a table")
-        known = {"sonarr", "radarr", "autopulse"}
+        known = {"sonarr", "radarr", "jellyfin", "autopulse"}
         unknown = set(raw_integrations) - known
         if unknown:
             raise ConfigError(f"unknown config key: integrations.{sorted(unknown)[0]}")
         integ = IntegrationsCfg()
-        raw_auto = raw_integrations.get("autopulse")
-        if raw_auto is not None:
-            if not isinstance(raw_auto, dict):
-                raise ConfigError("integrations.autopulse must be a table")
-            _fill(integ.autopulse, raw_auto, "integrations.autopulse.")
+        raw_jellyfin = raw_integrations.get("jellyfin")
+        if raw_jellyfin is None:
+            # One-way migration: accept the old section, retain only fields
+            # which have a Jellyfin meaning, and never write it back.
+            raw_jellyfin = raw_integrations.get("autopulse")
+        if raw_jellyfin is not None:
+            if not isinstance(raw_jellyfin, dict):
+                raise ConfigError("integrations.jellyfin must be a table")
+            migrated = {k: v for k, v in raw_jellyfin.items()
+                        if k in {"enabled", "url", "api_key", "timeout",
+                                 "max_retries"}}
+            _fill(integ.jellyfin, migrated, "integrations.jellyfin.")
         for provider in ("sonarr", "radarr"):
             raw_instances = raw_integrations.get(provider)
             if raw_instances is None:

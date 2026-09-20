@@ -1153,7 +1153,7 @@ function renderIntegration() {
 // One card per Sonarr/Radarr profile, plus the Jellyfin destination.
 // The card is deliberately the same shape as a library card: head, status
 // row, and the generated schema behind Configure.
-let integrations = { sonarr: [], radarr: [], autopulse: {}, modes: [] };
+let integrations = { sonarr: [], radarr: [], jellyfin: {}, modes: [] };
 const intOpen = new Set();          // "provider:id" of the expanded cards
 let autoOpen = false;
 
@@ -1203,9 +1203,9 @@ function intCard(c) {
   </div>`;
 }
 
-function autopulseCard() {
-  const a = integrations.autopulse || {};
-  return `<div class="lib ${a.enabled ? "" : "off"}" data-autopulse>
+function jellyfinCard() {
+  const a = integrations.jellyfin || {};
+  return `<div class="lib ${a.enabled ? "" : "off"}" data-jellyfin>
     <div class="lib-head">
       <label class="toggle" title="Tell Jellyfin about updated files">
         <input type="checkbox" data-auto-on ${a.enabled ? "checked" : ""}>
@@ -1226,7 +1226,7 @@ function autopulseCard() {
         <button class="small" data-auto-discard>Discard</button>
         <span class="muted" data-auto-note></span>
       </div>
-      ${sectionsHtml(a.schema || [], "autopulse:")}
+      ${sectionsHtml(a.schema || [], "jellyfin:")}
     </div>` : ""}
   </div>`;
 }
@@ -1238,7 +1238,7 @@ function renderIntegrations() {
       Add one, then paste its webhook URL into that application under
       Settings &rarr; Connect &rarr; Webhook, with On Import and On Upgrade
       ticked.</div></div>`;
-  el("autopulse").innerHTML = autopulseCard();
+  el("jellyfin").innerHTML = jellyfinCard();
   wireIntegrations();
 }
 
@@ -1260,8 +1260,8 @@ function refreshIntDirty(c) {
 }
 
 function refreshAutoDirty() {
-  const root = el("autopulse");
-  const d = collectDirty(integrations.autopulse.schema || [], "autopulse:", root);
+  const root = el("jellyfin");
+  const d = collectDirty(integrations.jellyfin.schema || [], "jellyfin:", root);
   const save = root.querySelector("[data-auto-save]");
   const note = root.querySelector("[data-auto-note]");
   if (save) save.disabled = d.size === 0;
@@ -1281,7 +1281,7 @@ function wireReveals(root) {
 
 function wireIntegrations() {
   const root = el("integrations");
-  const auto = el("autopulse");
+  const auto = el("jellyfin");
 
   root.querySelectorAll("[data-int-copy]").forEach((b) =>
     b.addEventListener("click", async () => {
@@ -1358,7 +1358,7 @@ function wireIntegrations() {
   });
 
   auto.querySelector("[data-auto-on]")?.addEventListener("change", async (e) => {
-    const d = await act("/api/integrations/autopulse",
+    const d = await act("/api/integrations/jellyfin",
       { updates: { enabled: e.target.checked } },
       e.target.checked ? "Jellyfin enabled" : "Jellyfin disabled");
     if (d) { integrations = d; renderIntegrations(); } else loadIntegrations();
@@ -1366,13 +1366,13 @@ function wireIntegrations() {
 
   auto.querySelector("[data-auto-test]")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
-    await act("/api/integrations/test", { provider: "autopulse" });
+    await act("/api/integrations/test", { provider: "jellyfin" });
     e.target.disabled = false;
   });
 
   if (autoOpen) {
     wireReveals(auto);
-    auto.querySelectorAll('[data-key^="autopulse:"]').forEach((n) => {
+    auto.querySelectorAll('[data-key^="jellyfin:"]').forEach((n) => {
       n.addEventListener("input", refreshAutoDirty);
       n.addEventListener("change", refreshAutoDirty);
     });
@@ -1381,7 +1381,7 @@ function wireIntegrations() {
     auto.querySelector("[data-auto-save]")?.addEventListener("click", async () => {
       const d = refreshAutoDirty();
       if (!d.size) return;
-      const res = await act("/api/integrations/autopulse",
+      const res = await act("/api/integrations/jellyfin",
         { updates: Object.fromEntries(d) },
         `Saved ${d.size} setting${d.size > 1 ? "s" : ""}`);
       if (res) { integrations = res; renderIntegrations(); }
@@ -1440,7 +1440,6 @@ const WF_STAGE = {
   queued: "waiting to encode",
   processing: "encode",
   arr_reconcile: "rescan and rename",
-  autopulse: "Jellyfin",
   jellyfin: "Jellyfin",
   done: "finished",
 };

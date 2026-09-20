@@ -147,7 +147,7 @@ matrix, no centre-channel boost. libfdk_aac when the build has it, native
 | **Dashboard** | Live counters, what is encoding with speed and ETA, the queue, last scan results, recent history. Buttons: *Scan now*, *Queue pending*, *Cancel all*, and a schedule toggle. |
 | **Libraries** | One card per library: paths, its mode, its counts and reclaimed bytes. *Configure* edits routing inline. *Scan* scans just that one. |
 | **Modes** | One card per mode: what it does, which libraries use it, all settings behind *Configure*. Editing one changes every library on it, and the card names them. |
-| **Integrations** | One card per Sonarr/Radarr profile: its webhook URL to copy, whether its credentials are complete, a Test button, and every setting behind *Configure*. The AutoPulse destination and the API key live here too. Below them, **Imports**: every import a webhook has accepted, the stage it is in, and *Retry* on the ones that failed. |
+| **Integrations** | One card per Sonarr/Radarr profile with its webhook URL and processing mode. The Jellyfin destination and API key live here too. Below them, **Imports** shows every accepted API import, its stage, and *Retry* for failures. |
 | **Files** | Every tracked file, with search and filters. Click a row for the full plan, its state, past runs, and per-file actions. |
 | **History** | Every run: before, after, percentage saved, how long. |
 | **Settings** | **Database snapshots** - the backups on disk, *Back up now*, and *Restore* - followed by every global setting with its documentation, validated on save. |
@@ -243,7 +243,7 @@ make the panel safe to expose.**
 
 ## Notifications
 
-AutoPulse is the preferred path for imports. Modes also have generic webhooks
+Direct Jellyfin media updates are used for API imports. Modes also have generic webhooks
 for everything else. Turn **Notifications** on for a mode and list URLs:
 
 ```toml
@@ -277,7 +277,7 @@ Delivery runs on one background thread, so a bulk import never holds up an
 encode. Timeouts and 5xx retry with a growing delay; 4xx does not.
 **Generic webhooks are best effort**: one that never succeeds is logged and
 dropped, because the file on disk is already correct. The native
-Arr/AutoPulse outbox is different, and keeps its failures for an explicit
+The durable Jellyfin outbox is different, and keeps its failures for an explicit
 retry.
 
 *Test hooks* on the Libraries tab fires a sample payload, so a typo shows up
@@ -383,11 +383,11 @@ The panel is a client of a plain JSON API.
 | POST | `/api/check` | `{"path": "...", "mode": null}`, plan one file |
 | POST | `/api/process` | `{"path": "...", "mode": null, "force": false}` |
 | POST | `/api/webhook/sonarr/<id>` | native Arr import hook |
-| GET | `/api/integrations` | Arr profiles, AutoPulse, webhook URLs, schemas |
+| GET | `/api/integrations` | Arr profiles, Jellyfin, webhook URLs, schemas |
 | POST | `/api/integrations/add` | `{"provider": "sonarr", "name": "TV"}` |
 | POST | `/api/integrations/update` | `{"provider": "sonarr", "id": "tv", "updates": {...}}` |
 | POST | `/api/integrations/delete` | `{"provider": "sonarr", "id": "tv"}` |
-| POST | `/api/integrations/autopulse` | `{"updates": {"enabled": true}}` |
+| POST | `/api/integrations/jellyfin` | `{"updates": {"enabled": true}}` |
 | POST | `/api/integrations/test` | `{"provider": "sonarr", "id": "tv"}`, checks credentials |
 | GET | `/api/workflow` | `?status=&limit=`, accepted imports and their stages |
 | POST | `/api/workflow/retry` | `{}` or `{"job_id": 12}`, no re-encode |

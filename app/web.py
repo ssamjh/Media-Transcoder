@@ -254,7 +254,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/integrations/add": self.api_integration_add,
                 "/api/integrations/update": self.api_integration_update,
                 "/api/integrations/delete": self.api_integration_delete,
-                "/api/integrations/autopulse": self.api_autopulse_update,
+                "/api/integrations/jellyfin": self.api_jellyfin_update,
                 "/api/integrations/test": self.api_integration_test,
             }.get(route)
             if handler is None:
@@ -510,7 +510,7 @@ class Handler(BaseHTTPRequestHandler):
             "stats": stats,
             "failed": int(stats["jobs"].get("failed", 0)),
             "now": time.time(),
-            "autopulse": self.engine.cfg.integrations.autopulse.enabled,
+            "jellyfin": self.engine.cfg.integrations.jellyfin.enabled,
         }
 
     def api_files(self) -> dict[str, Any]:
@@ -982,17 +982,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_integrations(self) -> dict[str, Any]:
         cfg = self.engine.cfg
-        auto = cfg.integrations.autopulse
+        auto = cfg.integrations.jellyfin
         return {
             "sonarr": [self._integration_card("sonarr", i)
                        for i in cfg.integrations.sonarr],
             "radarr": [self._integration_card("radarr", i)
                        for i in cfg.integrations.radarr],
-            "autopulse": {
+            "jellyfin": {
                 "enabled": auto.enabled,
                 "url": auto.url,
                 "configured": bool(auto.url),
-                "schema": config_mod.autopulse_schema(cfg),
+                "schema": config_mod.jellyfin_schema(cfg),
             },
             "modes": [{"id": m.id, "name": m.name} for m in cfg.modes],
             "api_key": cfg.web.api_key,
@@ -1039,18 +1039,18 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True, "message": f"removed {instance.name}",
                 **self.api_integrations()}
 
-    def api_autopulse_update(self, body: dict[str, Any]) -> dict[str, Any]:
+    def api_jellyfin_update(self, body: dict[str, Any]) -> dict[str, Any]:
         updates = body.get("updates")
         if not isinstance(updates, dict):
             raise ApiError("updates must be an object of dotted keys")
         try:
-            changed = config_mod.apply_autopulse_updates(
+            changed = config_mod.apply_jellyfin_updates(
                 self.engine.cfg, updates)
         except ConfigError as exc:
             raise ApiError(str(exc)) from None
         self._persist()
         if changed:
-            log.info("autopulse updated: %s", ", ".join(changed))
+            log.info("jellyfin updated: %s", ", ".join(changed))
         return {"ok": True, "changed": changed, **self.api_integrations()}
 
     def api_integration_test(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1062,8 +1062,8 @@ class Handler(BaseHTTPRequestHandler):
         without sending a fake media path.
         """
         provider = str(body.get("provider") or "").strip().lower()
-        if provider == "autopulse":
-            auto = self.engine.cfg.integrations.autopulse
+        if provider == "jellyfin":
+            auto = self.engine.cfg.integrations.jellyfin
             if not auto.url.strip():
                 raise ApiError("Jellyfin has no url configured")
             if not auto.api_key:
@@ -1071,7 +1071,7 @@ class Handler(BaseHTTPRequestHandler):
             target = auto.url.rstrip("/") + "/Library/Media/Updated"
             targets = {"jellyfin": target}
             message = "Jellyfin will be called at " + target
-            return {"ok": True, "provider": "autopulse",
+            return {"ok": True, "provider": "jellyfin",
                     "targets": targets, "message": message}
 
         provider, instance = self._arr_profile(body)
