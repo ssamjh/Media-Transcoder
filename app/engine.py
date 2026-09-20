@@ -951,6 +951,14 @@ class Engine:
         if durable_id:
             self.workflow.processing_succeeded(
                 durable_id, str(final), changed=True)
+        else:
+            # Files discovered by a scan or queued manually do not pass
+            # through the durable import workflow, but Jellyfin still needs
+            # the same targeted path update once replacement is complete.
+            self.notifier.dispatch(
+                notify.jellyfin_hooks(self.cfg),
+                notify.jellyfin_payload(str(final)),
+            )
         # Only now, with the verified encode in place of the original, is it
         # true to tell anyone else the file changed. `profile` and not `lib`,
         # so a mode can add or replace the callbacks for this one request -

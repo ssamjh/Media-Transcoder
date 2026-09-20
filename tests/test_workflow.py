@@ -1,4 +1,4 @@
-"""Durable Arr -> transcode -> rename -> AutoPulse workflow."""
+"""Durable Arr -> transcode -> Jellyfin workflow."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from unittest import mock
 from app.config import ArrInstanceCfg, AutoPulseCfg, Config, add_library
 from app.db import Db
 from app.engine import Engine
-from app.integrations import RenameResult
 from app.workflow import Workflow
 
 
@@ -26,8 +25,7 @@ class WorkflowTest(unittest.TestCase):
             id="tv", name="TV", url="http://sonarr:8989", api_key="arr",
             mode="cleanup", poll_interval=0.01)]
         self.cfg.integrations.autopulse = AutoPulseCfg(
-            enabled=True, url="http://autopulse:2875",
-            username="user", password="pass")
+            enabled=True, url="http://jellyfin:8096", api_key="jellyfin-key")
         self.workflow = Workflow(self.cfg, self.db)
 
     def accept(self):
@@ -80,7 +78,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(repaired["status"], "queued")
         self.assertEqual(repaired["job_id"], rows[0]["id"])
 
-    def test_engine_noop_import_is_still_handed_to_autopulse(self):
+    def test_engine_noop_import_is_still_handed_to_jellyfin(self):
         media = Path(self.tmp.name) / "TV"
         media.mkdir()
         path = media / "episode.mkv"
@@ -105,81 +103,49 @@ class WorkflowTest(unittest.TestCase):
                 engine._process_one(str(path), durable_id=job["id"]), "skip")
 
         action = self.db.get_outbox(
-            dedupe_key=job["dedupe_key"], action="autopulse")
+            dedupe_key=job["dedupe_key"], action="jellyfin")
         self.assertIsNotNone(action)
         self.assertEqual(self.db.get_job(job["id"])["status"], "waiting")
 
-    def test_changed_file_rescans_renames_then_notifies_autopulse(self):
+    def test_changed_file_goes_directly_to_jellyfin_without_arr_rescan(self):
         job, _ = self.accept()
         self.workflow.claim(job["id"])
         self.workflow.processing_succeeded(
             job["id"], "/media/TV/Show/episode.mkv", changed=True)
         self.assertEqual(self.workflow.recoverable(), [])
 
-        renamed = "/media/TV/Show/episode [HEVC AAC].mkv"
-        arr = mock.Mock()
-        arr.reconcile.return_value = RenameResult(renamed, 7, {}, {})
-        pulse = mock.Mock()
+        final = "/media/TV/Show/episode.mkv"
+        jellyfin = mock.Mock()
         with mock.patch("app.workflow.integrations.SonarrClient",
-                        return_value=arr), mock.patch(
-                            "app.workflow.integrations.AutoPulseClient",
-                            return_value=pulse):
-            self.assertTrue(self.workflow.drain_once())
+                        ) as arr, mock.patch(
+                            "app.workflow.integrations.JellyfinClient",
+                            return_value=jellyfin):
             self.assertTrue(self.workflow.drain_once())
 
-        arr.reconcile.assert_called_once()
-        pulse.trigger.assert_called_once_with(renamed)
+        arr.assert_not_called()
+        jellyfin.update.assert_called_once_with(final)
         done = self.db.get_job(job["id"])
         self.assertEqual(done["status"], "done")
         self.assertEqual(done["stage"], "complete")
-        self.assertEqual(done["final_path"], renamed)
+        self.assertEqual(done["final_path"], final)
         self.assertEqual(
-            [r["status"] for r in self.db.list_outbox()], ["done", "done"])
+            [r["status"] for r in self.db.list_outbox()], ["done"])
 
-    def test_unchanged_file_goes_straight_to_autopulse(self):
+    def test_unchanged_file_goes_straight_to_jellyfin(self):
         job, _ = self.accept()
         self.workflow.claim(job["id"])
         path = "/media/TV/Show/episode.mkv"
         self.workflow.processing_succeeded(job["id"], path, changed=False)
 
-        pulse = mock.Mock()
+        jellyfin = mock.Mock()
         with mock.patch("app.workflow.integrations.SonarrClient") as arr, \
-                mock.patch("app.workflow.integrations.AutoPulseClient",
-                           return_value=pulse):
+                mock.patch("app.workflow.integrations.JellyfinClient",
+                           return_value=jellyfin):
             self.assertTrue(self.workflow.drain_once())
 
         arr.assert_not_called()
-        pulse.trigger.assert_called_once_with(path)
+        jellyfin.update.assert_called_once_with(path)
         self.assertEqual(self.db.get_job(job["id"])["status"], "done")
-
-    def _drain_to_autopulse(self):
-        """Settle one unchanged import and return the AutoPulseClient kwargs."""
-        job, _ = self.accept()
-        self.workflow.claim(job["id"])
-        self.workflow.processing_succeeded(
-            job["id"], "/media/TV/Show/episode.mkv", changed=False)
-        client = mock.Mock(return_value=mock.Mock())
-        with mock.patch("app.workflow.integrations.AutoPulseClient", client):
-            self.assertTrue(self.workflow.drain_once())
-        return client.call_args.kwargs
-
-    def test_autopulse_trigger_is_chosen_by_the_importing_arr(self):
-        """One named trigger per Arr is the common AutoPulse arrangement."""
-        self.cfg.integrations.autopulse.sonarr_endpoint = "/triggers/sonarr"
-        self.cfg.integrations.autopulse.radarr_endpoint = "/triggers/radarr"
-
-        self.assertEqual(
-            self._drain_to_autopulse()["endpoint"], "/triggers/sonarr")
-
-    def test_autopulse_falls_back_to_the_shared_trigger(self):
-        """An install with one manual trigger must be left alone.
-
-        Including one that names a trigger for the *other* Arr: this import
-        came from Sonarr, which has no override.
-        """
-        self.cfg.integrations.autopulse.radarr_endpoint = "/triggers/radarr"
-        self.assertEqual(
-            self._drain_to_autopulse()["endpoint"], "/triggers/manual")
 
     def test_exhausted_delivery_is_failed_without_reencoding(self):
         self.cfg.integrations.autopulse.max_retries = 1
@@ -188,22 +154,22 @@ class WorkflowTest(unittest.TestCase):
         self.workflow.processing_succeeded(
             job["id"], "/media/TV/Show/episode.mkv", changed=False)
 
-        pulse = mock.Mock()
-        pulse.trigger.side_effect = RuntimeError("offline")
-        with mock.patch("app.workflow.integrations.AutoPulseClient",
-                        return_value=pulse):
+        jellyfin = mock.Mock()
+        jellyfin.update.side_effect = RuntimeError("offline")
+        with mock.patch("app.workflow.integrations.JellyfinClient",
+                        return_value=jellyfin):
             self.assertTrue(self.workflow.drain_once())
 
         failed = self.db.get_job(job["id"])
         self.assertEqual(failed["status"], "failed")
-        self.assertEqual(failed["stage"], "autopulse")
+        self.assertEqual(failed["stage"], "jellyfin")
         self.assertEqual(len(self.db.list_jobs()), 1)
 
         engine = Engine(self.cfg, self.db)
         self.assertEqual(engine.retry_workflow(job["id"]), 1)
         self.assertEqual(self.db.get_job(job["id"])["status"], "waiting")
         self.assertEqual(self.db.get_outbox(
-            dedupe_key=job["dedupe_key"], action="autopulse")["status"],
+            dedupe_key=job["dedupe_key"], action="jellyfin")["status"],
             "pending")
 
 

@@ -518,63 +518,23 @@ ARR_META: dict[str, dict[str, Any]] = {
                      "instance, for that run only. Empty means the mode the "
                      "file's library normally uses.",
              "choices": []},
-    "url": {"desc": "Base URL of this Sonarr/Radarr, as reachable from this "
-                    "container. Required for the rescan and rename stage.",
-            "hint": "http://sonarr:8989"},
-    "api_key": {"desc": "The Arr's own API key, from its Settings > General. "
-                        "Required for the rescan and rename stage.",
-                "secret": True},
-    "path_from": {"desc": "Path prefix as the Arr writes it. Leave both path "
-                          "fields empty when the media is mounted at the same "
-                          "place in both containers.",
-                  "hint": "/arr/media"},
-    "path_to": {"desc": "The same directory as mounted here. Set both path "
-                        "fields or neither.",
-                "hint": "/media"},
-    "request_timeout": {
-        "desc": "Seconds to wait for an ordinary API call.",
-        "min": 0.5, "max": 3600},
-    "command_timeout": {
-        "desc": "Seconds to wait for a rescan or rename command to finish. "
-                "Raise it for a large library on slow storage.",
-        "min": 0.5, "max": 3600},
-    "poll_interval": {
-        "desc": "Seconds between checks while a command runs.",
-        "min": 0.5, "max": 3600},
-    "max_retries": {
-        "desc": "How many times a failed rescan/rename is retried before the "
-                "job is parked for an explicit retry.",
-        "min": 0, "max": 10},
     "secret": {"desc": "Optional per-instance key this Arr may send instead "
                        "of the global API key.",
                "secret": True},
 }
 
-AUTOPULSE_SECTIONS: dict[str, str] = {"": "AutoPulse"}
+AUTOPULSE_SECTIONS: dict[str, str] = {"": "Jellyfin"}
 
 AUTOPULSE_META: dict[str, dict[str, Any]] = {
-    "enabled": {"desc": "Hand the final path to AutoPulse once the file is "
+    "enabled": {"desc": "Tell Jellyfin about the final path once the file is "
                         "processed and the Arr has renamed it. Off means the "
                         "workflow finishes after the Arr reconciliation."},
-    "url": {"desc": "Base URL of AutoPulse.", "hint": "http://autopulse:2875"},
-    "username": {"desc": "Basic-auth username."},
-    "password": {"desc": "Basic-auth password.", "secret": True},
-    "api_key": {"desc": "Unused. AutoPulse authenticates with the username "
-                        "and password above.", "readonly": True,
-                "secret": True},
-    "trigger_endpoint": {
-        "desc": "Path of the manual trigger, called as GET with ?path=. Used "
-                "for any file whose origin has no trigger of its own below."},
-    "sonarr_endpoint": {
-        "desc": "Trigger for files that arrived from Sonarr. Empty means use "
-                "the trigger above.", "hint": "/triggers/sonarr"},
-    "radarr_endpoint": {
-        "desc": "Trigger for files that arrived from Radarr. Empty means use "
-                "the trigger above.", "hint": "/triggers/radarr"},
-    "timeout": {"desc": "Seconds to wait for the trigger.",
+    "url": {"desc": "Base URL of Jellyfin.", "hint": "http://jellyfin:8096"},
+    "api_key": {"desc": "Jellyfin API key.", "secret": True},
+    "timeout": {"desc": "Seconds to wait for Jellyfin.",
                 "min": 0.5, "max": 300},
     "max_retries": {
-        "desc": "How many times a failed trigger is retried before the job is "
+        "desc": "How many times a failed update is retried before the job is "
                 "parked for an explicit retry.",
         "min": 0, "max": 10},
 }
@@ -1105,6 +1065,8 @@ def _validate_global(cfg: Config) -> None:
     auto = cfg.integrations.autopulse
     if auto.enabled and not auto.url.strip():
         raise ConfigError("integrations.autopulse.url is required when enabled")
+    if auto.enabled and not auto.api_key.strip():
+        raise ConfigError("integrations.autopulse.api_key is required when enabled")
     if auto.url and not auto.url.lower().startswith(("http://", "https://")):
         raise ConfigError("integrations.autopulse.url must start with http:// or https://")
     for field_name in ("trigger_endpoint", "sonarr_endpoint", "radarr_endpoint"):

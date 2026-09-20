@@ -1150,7 +1150,7 @@ function renderIntegration() {
 
 /* ---------- integrations ---------- */
 
-// One card per Sonarr/Radarr profile, plus the single AutoPulse destination.
+// One card per Sonarr/Radarr profile, plus the Jellyfin destination.
 // The card is deliberately the same shape as a library card: head, status
 // row, and the generated schema behind Configure.
 let integrations = { sonarr: [], radarr: [], autopulse: {}, modes: [] };
@@ -1180,21 +1180,17 @@ function intCard(c) {
       <span class="tag">${esc(c.provider)}</span>
       <span class="tag">${esc(c.id)}</span>
       <div class="grow"></div>
-      <button class="small" data-int-test="${esc(intKey(c.provider, c.id))}">Test</button>
       <button class="small" data-int-edit="${esc(intKey(c.provider, c.id))}">${
         open ? "Close" : "Configure"}</button>
       <button class="small danger" data-int-del="${esc(intKey(c.provider, c.id))}">Delete</button>
     </div>
     ${webhookRow(c)}
     <div class="stage-row">
-      <span class="stage ${c.outbound_ready ? "on" : "off"}">rescan and rename</span>
+      <span class="stage on">webhook receiver</span>
       <span class="stage ${c.mode ? "on" : "off"}">${
         c.mode ? "mode: " + esc(c.mode_name || c.mode) : "library's own mode"}</span>
       <span class="stage ${c.secret_configured ? "on" : "off"}">own secret</span>
     </div>
-    ${c.outbound_ready ? "" : `<div class="lib-stats"><span class="tag warn">
-      Add this application's url and api_key to enable the rescan and rename
-      stage</span></div>`}
     ${open ? `<div class="lib-body">
       <div class="toolbar" style="padding:13px 16px 0;margin:0">
         <button class="primary small" data-int-save="${esc(intKey(c.provider, c.id))}"
@@ -1211,10 +1207,10 @@ function autopulseCard() {
   const a = integrations.autopulse || {};
   return `<div class="lib ${a.enabled ? "" : "off"}" data-autopulse>
     <div class="lib-head">
-      <label class="toggle" title="Tell AutoPulse about finished imports">
+      <label class="toggle" title="Tell Jellyfin about updated files">
         <input type="checkbox" data-auto-on ${a.enabled ? "checked" : ""}>
       </label>
-      <span class="nm">AutoPulse</span>
+      <span class="nm">Jellyfin</span>
       <div class="grow"></div>
       <button class="small" data-auto-test>Test</button>
       <button class="small" data-auto-edit>${autoOpen ? "Close" : "Configure"}</button>
@@ -1364,7 +1360,7 @@ function wireIntegrations() {
   auto.querySelector("[data-auto-on]")?.addEventListener("change", async (e) => {
     const d = await act("/api/integrations/autopulse",
       { updates: { enabled: e.target.checked } },
-      e.target.checked ? "AutoPulse enabled" : "AutoPulse disabled");
+      e.target.checked ? "Jellyfin enabled" : "Jellyfin disabled");
     if (d) { integrations = d; renderIntegrations(); } else loadIntegrations();
   });
 
@@ -1436,7 +1432,7 @@ el("i-add-radarr").addEventListener("click", () => addIntegration("radarr"));
 
 // The durable import queue. A job is one accepted Sonarr/Radarr import: it
 // carries the encode, and the outbox actions hanging off it carry what
-// happens afterwards (the Arr rescan and rename, then AutoPulse). A stuck
+// happens afterwards (the targeted Jellyfin update). A stuck
 // import is stuck in exactly one of those, so the row names the stage.
 let workflow = { jobs: [], stats: { jobs: {}, outbox: {} } };
 
@@ -1444,7 +1440,8 @@ const WF_STAGE = {
   queued: "waiting to encode",
   processing: "encode",
   arr_reconcile: "rescan and rename",
-  autopulse: "AutoPulse",
+  autopulse: "Jellyfin",
+  jellyfin: "Jellyfin",
   done: "finished",
 };
 

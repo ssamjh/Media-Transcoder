@@ -2,9 +2,8 @@
 
 The encoder and remote applications have deliberately separate lifetimes.  An
 Arr webhook is committed as a processing job before it is acknowledged; once
-the file is settled, remote reconciliation and the AutoPulse hand-off move to
-the durable outbox.  Retrying either remote call can therefore never re-run an
-encode.
+the file is settled, the targeted Jellyfin update moves to the durable outbox.
+Retrying that remote call can therefore never re-run an encode.
 """
 
 from __future__ import annotations
@@ -150,22 +149,17 @@ class Workflow:
 
     def processing_succeeded(self, job_id: int, final_path: str,
                              *, changed: bool) -> None:
-        """Move a settled file to Arr reconciliation or AutoPulse."""
+        """Move a settled import directly to its Jellyfin update."""
         job = self.db.get_job(job_id)
         if job is None:
             return
         metadata = loads(job["source_metadata"], {})
         provider = str(job["source_provider"] or "")
-        instance = self._arr_instance(provider, metadata.get("integration"))
-        if changed and provider in {"sonarr", "radarr"}:
-            action = "arr_reconcile"
-            stage = "arr_reconcile"
-        elif self._autopulse_enabled():
-            action = "autopulse"
-            stage = "autopulse"
-        else:
+        if not self._autopulse_enabled():
             self._complete_job(job_id, final_path)
             return
+        action = "jellyfin"
+        stage = "jellyfin"
         out = {
             "provider": provider,
             "integration": metadata.get("integration") or "",
@@ -174,17 +168,6 @@ class Workflow:
             "original_path": job["source_path"],
             "final_path": final_path,
         }
-        # An inbound-only profile cannot reconcile a changed filename.  Keep
-        # the action durable and visibly failed rather than telling Jellyfin
-        # about a path which Arr has not finalized.
-        if action == "arr_reconcile" and instance is None:
-            self.db.update_job(job_id, stage=stage, status="failed",
-                               final_path=final_path,
-                               error=f"no enabled {provider} integration")
-            self._update_import(job, stage=stage, status="failed",
-                                final_path=final_path,
-                                error=f"no enabled {provider} integration")
-            return
         self.db.transition_job_to_outbox(
             job_id, stage=stage, final_path=final_path,
             action=action, payload=out)
@@ -220,8 +203,8 @@ class Workflow:
                                             stage="autopulse", status="waiting")
                 else:
                     self._complete_job(row["job_id"], final_path)
-            elif row["action"] == "autopulse":
-                self._send_autopulse(str(payload["final_path"]),
+            elif row["action"] in {"jellyfin", "autopulse"}:
+                self._send_jellyfin(str(payload["final_path"]),
                                      payload.get("provider"))
                 self._complete_job(row["job_id"], str(payload["final_path"]))
             else:
@@ -264,21 +247,15 @@ class Workflow:
             final_path=payload.get("final_path"))
         return result.final_path
 
-    def _send_autopulse(self, path: str, provider: str | None = None) -> None:
+    def _send_jellyfin(self, path: str, provider: str | None = None) -> None:
         cfg = self.cfg.integrations.autopulse
         if not _value(cfg, "url", ""):
-            raise integrations.IntegrationError("AutoPulse url is not configured")
-        # An install with one named trigger per Arr needs the file's origin to
-        # pick between them; without an override this is trigger_endpoint.
-        chooser = getattr(cfg, "endpoint_for", None)
-        endpoint = (chooser(provider) if chooser
-                    else _value(cfg, "trigger_endpoint", "/triggers/manual"))
-        client = integrations.AutoPulseClient(
-            cfg.url, username=_value(cfg, "username", None),
-            password=_value(cfg, "password", None),
-            endpoint=endpoint or "/triggers/manual",
-            timeout=float(_value(cfg, "timeout", 15)))
-        client.trigger(path)
+            raise integrations.IntegrationError("Jellyfin url is not configured")
+        if not _value(cfg, "api_key", ""):
+            raise integrations.IntegrationError("Jellyfin api_key is not configured")
+        integrations.JellyfinClient(
+            cfg.url, cfg.api_key,
+            timeout=float(_value(cfg, "timeout", 15))).update(path)
 
     def _retry_or_fail(self, row: Any, exc: Exception) -> None:
         limit = self._retry_limit(row)
@@ -302,7 +279,7 @@ class Workflow:
                     row["action"], row["job_id"], message, delay)
 
     def _retry_limit(self, row: Any) -> int:
-        if row["action"] == "autopulse":
+        if row["action"] in {"jellyfin", "autopulse"}:
             return max(1, int(_value(self.cfg.integrations.autopulse,
                                      "max_retries", 5)))
         payload = loads(row["payload"], {})

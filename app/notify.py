@@ -215,6 +215,22 @@ def hooks_for(notify: Any) -> list[Webhook]:
     ]
 
 
+def jellyfin_hooks(cfg: Any) -> list[Webhook]:
+    """Build the direct Jellyfin update hook used by non-import/manual work."""
+    target = getattr(getattr(cfg, "integrations", None), "autopulse", None)
+    if not target or not target.enabled or not str(target.url).strip() or not target.api_key:
+        return []
+    return [Webhook(
+        url=str(target.url).rstrip("/") + "/Library/Media/Updated",
+        headers={"X-Emby-Token": str(target.api_key)},
+        timeout=float(target.timeout), retries=max(1, int(target.max_retries)),
+    )]
+
+
+def jellyfin_payload(path: str) -> dict[str, Any]:
+    return {"Updates": [{"Path": str(path), "UpdateType": "Modified"}]}
+
+
 def payload_for(path: str, *, library: str, mode: str, status: str,
                 original: str = "", in_size: int = 0, out_size: int = 0,
                 elapsed: float = 0.0,

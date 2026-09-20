@@ -173,6 +173,18 @@ class TestConfigSurface(unittest.TestCase):
     def test_notifications_are_off_by_default(self):
         self.assertEqual(notify.hooks_for(ModeCfg().notify), [])
 
+    def test_jellyfin_hook_uses_direct_api_schema(self):
+        target = self.cfg.integrations.autopulse
+        target.enabled = True
+        target.url = "http://jellyfin:8096"
+        target.api_key = "key"
+        hooks = notify.jellyfin_hooks(self.cfg)
+        self.assertEqual(hooks[0].url,
+                         "http://jellyfin:8096/Library/Media/Updated")
+        self.assertEqual(hooks[0].headers["X-Emby-Token"], "key")
+        self.assertEqual(notify.jellyfin_payload("/media/a.mkv"), {
+            "Updates": [{"Path": "/media/a.mkv", "UpdateType": "Modified"}]})
+
     def test_a_mode_carries_its_own_hooks(self):
         apply_mode_updates(self.cfg, self.mode, {
             "notify.enabled": True,

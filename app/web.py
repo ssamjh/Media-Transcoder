@@ -456,8 +456,8 @@ class Handler(BaseHTTPRequestHandler):
     def api_workflow(self) -> dict[str, Any]:
         """The durable import queue: one entry per accepted Arr import.
 
-        Jobs carry the encode; the outbox rows carry what happens after it
-        (the Arr rescan/rename, then AutoPulse). Both are shown against the
+        Jobs carry the encode; the outbox rows carry the targeted Jellyfin
+        update. Both are shown against the
         job, because a stuck import is almost always stuck in one stage and
         the panel's job is to say which.
         """
@@ -974,8 +974,7 @@ class Handler(BaseHTTPRequestHandler):
             "mode_name": mode.name if mode else "",
             "url": instance.url,
             "webhook": f"{self._origin()}/api/webhook/{provider}/{instance.id}",
-            # Enough to reconcile with the Arr, or only enough to receive?
-            "outbound_ready": bool(instance.url and instance.api_key),
+            "outbound_ready": True,
             "api_key_configured": bool(instance.api_key),
             "secret_configured": bool(instance.secret),
             "schema": config_mod.arr_schema(instance, cfg),
@@ -1058,26 +1057,20 @@ class Handler(BaseHTTPRequestHandler):
         """Prove a profile's outbound credentials work, changing nothing.
 
         Sonarr and Radarr answer system/status, which is the cheapest call
-        that still proves the URL, the port and the key. AutoPulse has no
-        read-only endpoint and its only verb triggers a real scan, so it is
-        checked as far as being configured and no further.
+        that still proves the URL, the port and the key. Jellyfin's update
+        endpoint changes state, so its panel check validates configuration
+        without sending a fake media path.
         """
         provider = str(body.get("provider") or "").strip().lower()
         if provider == "autopulse":
             auto = self.engine.cfg.integrations.autopulse
             if not auto.url.strip():
-                raise ApiError("AutoPulse has no url configured")
-            base = auto.url.rstrip("/")
-            targets = {
-                origin: base + "/" + auto.endpoint_for(origin).lstrip("/")
-                for origin in ("sonarr", "radarr")
-            }
-            if len(set(targets.values())) == 1:
-                message = ("AutoPulse will be called at "
-                           + next(iter(targets.values())))
-            else:
-                message = "AutoPulse will be called at " + ", ".join(
-                    f"{origin}: {url}" for origin, url in targets.items())
+                raise ApiError("Jellyfin has no url configured")
+            if not auto.api_key:
+                raise ApiError("Jellyfin has no api_key configured")
+            target = auto.url.rstrip("/") + "/Library/Media/Updated"
+            targets = {"jellyfin": target}
+            message = "Jellyfin will be called at " + target
             return {"ok": True, "provider": "autopulse",
                     "targets": targets, "message": message}
 

@@ -213,14 +213,12 @@ class IntegrationApiTest(unittest.TestCase):
                               {"updates": {"enabled": True}})
         self.assertEqual(status, 400)
 
-    def test_autopulse_password_is_marked_secret(self):
+    def test_jellyfin_api_key_is_marked_secret(self):
         d, _ = self.get("/api/integrations")
         fields = {f["key"]: f
                   for b in d["autopulse"]["schema"] for f in b["fields"]}
-        self.assertTrue(fields["password"]["secret"])
-        # api_key is read by nothing, so the panel shows it as untouchable
-        # rather than offering a setting that does nothing.
-        self.assertTrue(fields["api_key"]["readonly"])
+        self.assertTrue(fields["api_key"]["secret"])
+        self.assertFalse(fields["api_key"]["readonly"])
 
     # --- test button ------------------------------------------------------
 

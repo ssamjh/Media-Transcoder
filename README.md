@@ -181,8 +181,8 @@ processes it, without waiting for a scan to notice it.
 2. **Copy the webhook URL from the card** into that Arr under
    Settings → Connect → Webhook, with **On Import** and **On Upgrade** ticked
    and the API key as an `X-Api-Key` header.
-3. **Turn on the AutoPulse card** to hand the final path to Jellyfin.
-4. **Remove any existing Arr-to-AutoPulse hook** for import events.
+3. **Turn on the Jellyfin card** and enter its URL and API key.
+4. **Remove any existing Arr-to-AutoPulse hook**; it is no longer needed.
 
 **The chain starts after the Arr import, deliberately.** With copy imports (no
 hard links) only the library copy changes, so the torrent payload keeps
@@ -191,14 +191,14 @@ seeding. Do not put the transcoder between the download client and the Arr.
 Each import runs three independent, durable stages:
 
 ```text
-processing -> arr_reconcile -> autopulse -> complete
+processing -> arr_reconcile -> Jellyfin update -> complete
 ```
 
 - A restart resumes the current stage.
 - Failures back off, stay visible, and retry with `POST /api/workflow/retry`,
   **never re-running ffmpeg**.
 - Duplicate webhook deliveries are deduplicated.
-- If a file cannot be reconciled with the Arr, AutoPulse is not called with a
+- If a file cannot be reconciled with the Arr, Jellyfin is not called with a
   stale filename.
 - Test, Rename, Health and Grab events answer `ignored: true` and queue
   nothing.

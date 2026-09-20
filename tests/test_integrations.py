@@ -13,6 +13,7 @@ from app.integrations import (
     AutoPulseClient,
     CommandFailedError,
     IntegrationHTTPError,
+    JellyfinClient,
     PathMapping,
     SonarrClient,
 )
@@ -140,6 +141,29 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(_FakePulse.payload, {"path": "D:/media/file.mkv", "hash": "abc123"})
         expected = "Basic " + base64.b64encode(b"user:pass").decode()
         self.assertEqual(_FakePulse.auth, expected)
+
+    def test_jellyfin_update_uses_targeted_media_api(self):
+        seen = {}
+
+        class Response:
+            status = 204
+            def read(self): return b""
+            def close(self): pass
+
+        def opener(request, timeout):
+            seen.update(url=request.full_url, method=request.method,
+                        headers=dict(request.headers),
+                        body=json.loads(request.data))
+            return Response()
+
+        JellyfinClient("http://jellyfin:8096", "secret",
+                       opener=opener).update("/media/Film.mkv")
+        self.assertEqual(seen["url"],
+                         "http://jellyfin:8096/Library/Media/Updated")
+        self.assertEqual(seen["method"], "POST")
+        self.assertEqual(seen["headers"]["X-emby-token"], "secret")
+        self.assertEqual(seen["body"], {"Updates": [{
+            "Path": "/media/Film.mkv", "UpdateType": "Modified"}]})
 
     def test_http_errors_are_explicit(self):
         client = SonarrClient(

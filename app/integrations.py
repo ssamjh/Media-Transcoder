@@ -528,6 +528,42 @@ class RadarrClient(ArrClient):
     provider = "radarr"
 
 
+class JellyfinClient:
+    """Tell Jellyfin that one media path was created or modified."""
+
+    def __init__(self, base_url: str, api_key: str, *, timeout: float = 30.0,
+                 opener: Callable[..., Any] | None = None) -> None:
+        self.url = str(base_url).rstrip("/") + "/Library/Media/Updated"
+        self.api_key = str(api_key)
+        self.timeout = float(timeout)
+        self.opener = opener or urllib.request.urlopen
+
+    def update(self, path: str, update_type: str = "Modified") -> None:
+        data = json.dumps({"Updates": [{"Path": str(path),
+                                        "UpdateType": update_type}]}).encode("utf-8")
+        request = urllib.request.Request(
+            self.url, data=data, method="POST",
+            headers={"Accept": "application/json", "Content-Type": "application/json",
+                     "X-Emby-Token": self.api_key})
+        try:
+            response = _open(self.opener, request, self.timeout)
+            try:
+                status = int(getattr(response, "status", getattr(response, "code", 200)))
+                raw = response.read()
+            finally:
+                close = getattr(response, "close", None)
+                if close:
+                    close()
+        except urllib.error.HTTPError as exc:
+            raise IntegrationHTTPError(exc.code, self.url, exc.read().decode(
+                "utf-8", errors="replace")) from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise IntegrationError(f"HTTP request to {self.url} failed: {exc}") from exc
+        if status < 200 or status >= 300:
+            text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            raise IntegrationHTTPError(status, self.url, text)
+
+
 class AutoPulseClient:
     """Trigger AutoPulse's manual import endpoint.
 
@@ -624,7 +660,7 @@ class AutoPulseClient:
 
 
 __all__ = [
-    "ArrClient", "AutoPulseClient", "CommandFailedError", "CommandTimeoutError",
+    "ArrClient", "AutoPulseClient", "JellyfinClient", "CommandFailedError", "CommandTimeoutError",
     "IntegrationError", "IntegrationHTTPError", "IntegrationProtocolError",
     "PathMapping", "RadarrClient", "RenameResult", "SonarrClient",
 ]

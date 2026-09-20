@@ -165,24 +165,21 @@ it**. The transcoder calls AutoPulse itself, after the file and its Arr name
 are final; leaving the old one in place tells Jellyfin about a filename that is
 about to change.
 
-## 5. AutoPulse
+## 5. Jellyfin
 
-AutoPulse is what actually pokes Jellyfin. It is the **AutoPulse** card at the
-bottom of the Integrations tab, shared by every profile. Tick it on, press
+The **Jellyfin** card at the bottom of the Integrations tab is shared by every
+profile. Tick it on, press
 **Configure**, and fill in:
 
 | Field | Value |
 | --- | --- |
-| `url` | `http://autopulse:2875` |
-| `username` / `password` | AutoPulse basic-auth credentials. The password is masked. |
-| `trigger_endpoint` | `/triggers/manual`, unless yours differs. |
+| `url` | `http://jellyfin:8096` |
+| `api_key` | A Jellyfin API key. |
 | `timeout`, `max_retries` | How long to wait, and how many times to retry before parking the job. |
 
-The transcoder calls `GET /triggers/manual?path=<final path>` with basic auth,
-using the path **after** the Arr rename, which is the point of doing it in this
-order. The `path` AutoPulse receives is the transcoder's path, so AutoPulse's
-own rewrite rules must map it to what Jellyfin sees: the same concern as step
-1, one hop further along.
+The transcoder posts Jellyfin's `Updates` payload to
+`/Library/Media/Updated`, using the path **after** the Arr rename. The same
+targeted call is made for files processed manually or by a scheduled scan.
 
 The card's **Test** button confirms the URL it will call. It does not fire a
 real trigger, because the only verb AutoPulse offers starts a real scan.
@@ -222,10 +219,8 @@ api_key = "radarr-api-key"
 
 [integrations.autopulse]
 enabled = true
-url = "http://autopulse:2875"
-username = "autopulse-user"
-password = "autopulse-password"
-trigger_endpoint = "/triggers/manual"
+url = "http://jellyfin:8096"
+api_key = "jellyfin-api-key"
 timeout = 15.0
 max_retries = 3
 ```
