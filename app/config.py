@@ -267,6 +267,61 @@ class WebCfg:
 
 
 @dataclass
+class ArrInstanceCfg:
+    """One named Sonarr or Radarr webhook profile.
+
+    The inbound endpoint itself is shared by all instances.  ``id`` is the
+    stable name used in an endpoint such as ``/api/webhook/sonarr/tv``;
+    ``name`` is what Arr sends as ``instanceName`` and is also accepted when
+    resolving a profile.  ``secret`` is an optional per-instance credential
+    for installations that do not want to share the global API key.
+    """
+
+    id: str = "default"
+    name: str = "Default"
+    enabled: bool = True
+    mode: str = ""
+    # Optional outbound Arr connection.  Inbound-only profiles can leave
+    # these blank; path mapping is an identity mapping unless both sides are
+    # supplied.
+    url: str = ""
+    api_key: str = ""
+    path_from: str = ""
+    path_to: str = ""
+    request_timeout: float = 15.0
+    command_timeout: float = 300.0
+    poll_interval: float = 2.0
+    max_retries: int = 3
+    secret: str = ""
+
+
+@dataclass
+class AutoPulseCfg:
+    """Optional outbound AutoPulse target for integration consumers."""
+
+    enabled: bool = False
+    url: str = ""
+    api_key: str = ""
+    username: str = ""
+    password: str = ""
+    trigger_endpoint: str = "/triggers/manual"
+    timeout: float = 15.0
+    max_retries: int = 3
+
+
+@dataclass
+class IntegrationsCfg:
+    """Named inbound Arr profiles and an optional AutoPulse destination."""
+
+    sonarr: list[ArrInstanceCfg] = field(default_factory=list)
+    radarr: list[ArrInstanceCfg] = field(default_factory=list)
+    autopulse: AutoPulseCfg = field(default_factory=AutoPulseCfg)
+
+    def instances(self, provider: str) -> list[ArrInstanceCfg]:
+        return getattr(self, str(provider).strip().lower(), [])
+
+
+@dataclass
 class Config:
     state_db: str = "/config/state.db"
     dry_run: bool = False
@@ -274,6 +329,7 @@ class Config:
     workers: WorkersCfg = field(default_factory=WorkersCfg)
     output: OutputCfg = field(default_factory=OutputCfg)
     web: WebCfg = field(default_factory=WebCfg)
+    integrations: IntegrationsCfg = field(default_factory=IntegrationsCfg)
     # No library by default: a fresh install has nothing to scan until
     # someone points it at a path, and guessing /media would start a scan
     # of whatever happened to be mounted there.
@@ -629,6 +685,48 @@ def schema(cfg: Config) -> list[dict[str, Any]]:
     return out
 
 
+def integration_schema(cfg: Config) -> dict[str, Any]:
+    """A redacted view of named integration profiles for API consumers.
+
+    Secrets deliberately do not appear here.  The generated TOML remains the
+    source of truth (and is already protected by the web API's trusted-network
+    model), while a panel can show whether a credential is configured without
+    copying it into client-side state.
+    """
+    out: dict[str, Any] = {}
+    for provider in ("sonarr", "radarr"):
+        out[provider] = [
+            {
+                "id": i.id,
+                "name": i.name,
+                "enabled": i.enabled,
+                "mode": i.mode,
+                "url": i.url,
+                "path_from": i.path_from,
+                "path_to": i.path_to,
+                "request_timeout": i.request_timeout,
+                "command_timeout": i.command_timeout,
+                "poll_interval": i.poll_interval,
+                "max_retries": i.max_retries,
+                "api_key_configured": bool(i.api_key),
+                "secret_configured": bool(i.secret),
+            }
+            for i in cfg.integrations.instances(provider)
+        ]
+    auto = cfg.integrations.autopulse
+    out["autopulse"] = {
+        "enabled": auto.enabled,
+        "url": auto.url,
+        "username": auto.username,
+        "trigger_endpoint": auto.trigger_endpoint,
+        "max_retries": auto.max_retries,
+        "api_key_configured": bool(auto.api_key),
+        "password_configured": bool(auto.password),
+        "timeout": auto.timeout,
+    }
+    return out
+
+
 def library_schema(lib: LibraryCfg,
                    cfg: Config | None = None) -> list[dict[str, Any]]:
     """Describe one library's settings.
@@ -747,7 +845,12 @@ def _apply(target: Any, updates: dict[str, Any],
 
     for key, incoming in updates.items():
         section, _, name = key.rpartition(".")
-        holder = target if not section else getattr(target, section, None)
+        holder = target
+        if section:
+            for part in section.split("."):
+                holder = getattr(holder, part, None)
+                if holder is None:
+                    break
         if holder is None or not any(f.name == name for f in fields(holder)):
             raise ConfigError(f"unknown setting: {key}")
         if meta.get(key, {}).get("readonly"):
@@ -815,6 +918,53 @@ def _validate_global(cfg: Config) -> None:
             raise ConfigError(
                 f"library {lib.id} names mode {lib.mode!r}, which does not "
                 f"exist (known modes: {known})")
+    for provider in ("sonarr", "radarr"):
+        seen: set[str] = set()
+        for instance in cfg.integrations.instances(provider):
+            if not instance.id.strip():
+                raise ConfigError(f"{provider} integration ids cannot be empty")
+            key = instance.id.casefold()
+            if key in seen:
+                raise ConfigError(f"{provider} integration ids must be unique")
+            seen.add(key)
+            if instance.mode and cfg.mode(instance.mode) is None:
+                raise ConfigError(
+                    f"{provider} integration {instance.id} names mode "
+                    f"{instance.mode!r}, which does not exist")
+    if not (0.5 <= cfg.integrations.autopulse.timeout <= 300):
+        raise ConfigError("integrations.autopulse.timeout must be between "
+                          "0.5 and 300")
+    if not (0 <= cfg.integrations.autopulse.max_retries <= 10):
+        raise ConfigError("integrations.autopulse.max_retries must be between "
+                          "0 and 10")
+    auto = cfg.integrations.autopulse
+    if auto.enabled and not auto.url.strip():
+        raise ConfigError("integrations.autopulse.url is required when enabled")
+    if auto.url and not auto.url.lower().startswith(("http://", "https://")):
+        raise ConfigError("integrations.autopulse.url must start with http:// or https://")
+    if auto.trigger_endpoint and not auto.trigger_endpoint.startswith("/"):
+        raise ConfigError("integrations.autopulse.trigger_endpoint must start with /")
+    for provider in ("sonarr", "radarr"):
+        for instance in cfg.integrations.instances(provider):
+            if bool(instance.path_from) != bool(instance.path_to):
+                raise ConfigError(
+                    f"{provider} integration {instance.id} must set both "
+                    "path_from and path_to")
+            if instance.url and not instance.url.lower().startswith(
+                    ("http://", "https://")):
+                raise ConfigError(
+                    f"{provider} integration {instance.id} url must start "
+                    "with http:// or https://")
+            for name in ("request_timeout", "command_timeout", "poll_interval"):
+                value = getattr(instance, name)
+                if value <= 0 or value > 3600:
+                    raise ConfigError(
+                        f"{provider} integration {instance.id} {name} must be "
+                        "greater than 0 and at most 3600")
+            if not (0 <= instance.max_retries <= 10):
+                raise ConfigError(
+                    f"{provider} integration {instance.id} max_retries must "
+                    "be between 0 and 10")
 
 
 def _validate_profile(lib: ModeCfg | Profile) -> None:
@@ -1076,6 +1226,51 @@ def dump_toml(cfg: Config) -> str:
     ]
     _emit(schema(cfg), "", out)
 
+    # Integration profiles are intentionally kept out of the ordinary scalar
+    # settings schema: they are named records, not fields that can be safely
+    # edited by dotted-key updates.  They still round-trip as first-class TOML
+    # and are consumed by the native Arr webhook routes.
+    out.extend([
+        "",
+        "# " + "-" * 70,
+        "# Native Sonarr/Radarr webhook integrations",
+        "# Use /api/webhook/sonarr/<id> or /api/webhook/radarr/<id> for a",
+        "# named profile. Leave the lists empty to use the shared endpoint.",
+        "# " + "-" * 70,
+    ])
+    for provider in ("sonarr", "radarr"):
+        for instance in getattr(cfg.integrations, provider):
+            out.extend([
+                "",
+                f"[[integrations.{provider}]]",
+                f"id = {_fmt(instance.id)}",
+                f"name = {_fmt(instance.name)}",
+                f"enabled = {_fmt(instance.enabled)}",
+                f"mode = {_fmt(instance.mode)}",
+                f"url = {_fmt(instance.url)}",
+                f"api_key = {_fmt(instance.api_key)}",
+                f"path_from = {_fmt(instance.path_from)}",
+                f"path_to = {_fmt(instance.path_to)}",
+                f"request_timeout = {_fmt(instance.request_timeout)}",
+                f"command_timeout = {_fmt(instance.command_timeout)}",
+                f"poll_interval = {_fmt(instance.poll_interval)}",
+                f"max_retries = {_fmt(instance.max_retries)}",
+                f"secret = {_fmt(instance.secret)}",
+            ])
+    auto = cfg.integrations.autopulse
+    out.extend([
+        "",
+        "[integrations.autopulse]",
+        f"enabled = {_fmt(auto.enabled)}",
+        f"url = {_fmt(auto.url)}",
+        f"api_key = {_fmt(auto.api_key)}",
+        f"username = {_fmt(auto.username)}",
+        f"password = {_fmt(auto.password)}",
+        f"trigger_endpoint = {_fmt(auto.trigger_endpoint)}",
+        f"timeout = {_fmt(auto.timeout)}",
+        f"max_retries = {_fmt(auto.max_retries)}",
+    ])
+
     if not cfg.libraries:
         out.append("")
         out.append("# " + "-" * 70)
@@ -1270,8 +1465,38 @@ def _from_dict(data: dict[str, Any]) -> Config:
     data = dict(data)
     raw_libs = data.pop("libraries", None)
     raw_modes = data.pop("modes", None)
+    raw_integrations = data.pop("integrations", None)
 
     _fill(cfg, data, "")
+
+    if raw_integrations is not None:
+        if not isinstance(raw_integrations, dict):
+            raise ConfigError("integrations must be a table")
+        known = {"sonarr", "radarr", "autopulse"}
+        unknown = set(raw_integrations) - known
+        if unknown:
+            raise ConfigError(f"unknown config key: integrations.{sorted(unknown)[0]}")
+        integ = IntegrationsCfg()
+        raw_auto = raw_integrations.get("autopulse")
+        if raw_auto is not None:
+            if not isinstance(raw_auto, dict):
+                raise ConfigError("integrations.autopulse must be a table")
+            _fill(integ.autopulse, raw_auto, "integrations.autopulse.")
+        for provider in ("sonarr", "radarr"):
+            raw_instances = raw_integrations.get(provider)
+            if raw_instances is None:
+                continue
+            if not isinstance(raw_instances, list):
+                raise ConfigError(f"integrations.{provider} must be an array")
+            parsed: list[ArrInstanceCfg] = []
+            for i, raw in enumerate(raw_instances):
+                if not isinstance(raw, dict):
+                    raise ConfigError(f"integrations.{provider}[{i}] must be a table")
+                instance = ArrInstanceCfg()
+                _fill(instance, raw, f"integrations.{provider}[{i}].")
+                parsed.append(instance)
+            setattr(integ, provider, parsed)
+        cfg.integrations = integ
 
     if raw_modes is not None:
         cfg.modes = []

@@ -22,6 +22,7 @@ from .config import Config, ConfigError, LibraryCfg, Profile, resolve
 from .db import Db
 from .plan import FilePlan, plan_file
 from .probe import ProbeError, probe_file
+from .workflow import Workflow
 
 log = logging.getLogger("transcoder")
 
@@ -80,10 +81,10 @@ class Engine:
 
         self._queue: queue.Queue[str] = queue.Queue()
         self._queued: set[str] = set()
-        # Modes are one-shot: a path's mode lives only until it is processed,
-        # and is deliberately not persisted. A restart drops them, which is
-        # the same outcome as the scan that follows.
+        # Ordinary one-shot modes live here. Native import modes are also
+        # persisted in Workflow jobs and restored into this map on recovery.
         self._modes: dict[str, str] = {}
+        self._durable_jobs: dict[str, int] = {}
         self._cancelled: set[str] = set()
         # Serialises the copy back onto the library. See _process_one.
         self._copy_lock = threading.Lock()
@@ -91,6 +92,7 @@ class Engine:
         # finish a dozen files at once, and none of them should wait on
         # somebody else's HTTP server.
         self.notifier = notify.Notifier()
+        self.workflow = Workflow(cfg, db)
         self._active: dict[str, ActiveJob] = {}
         self._lock = threading.RLock()
 
@@ -119,6 +121,11 @@ class Engine:
                      removed, "y" if removed == 1 else "ies",
                      freed / (1024 ** 3))
 
+        # Rehydrate accepted imports before workers start consuming.  The
+        # database reset running jobs to pending when it opened.
+        for row in self.workflow.recoverable():
+            self._push_durable(row)
+
         for i in range(max(1, self.cfg.workers.count)):
             t = threading.Thread(target=self._worker_loop, name=f"worker-{i}",
                                  daemon=True)
@@ -129,15 +136,18 @@ class Engine:
         t.start()
         self._threads.append(t)
         self.notifier.start()
+        self.workflow.start()
         log.info("started %d worker(s)", self.cfg.workers.count)
 
     def stop(self) -> None:
         self._stop.set()
         self.notifier.stop()
+        self.workflow.stop()
 
     def join(self, timeout: float = 30.0) -> None:
         deadline = time.monotonic() + timeout
         self.notifier.join(timeout=max(0.1, deadline - time.monotonic()))
+        self.workflow.join(timeout=max(0.1, deadline - time.monotonic()))
         for t in self._threads:
             t.join(timeout=max(0.1, deadline - time.monotonic()))
 
@@ -212,6 +222,47 @@ class Engine:
         self._push(path)
         return True, f"queued ({mode})" if mode else "queued"
 
+    def enqueue_import(self, path: str, *, provider: str,
+                       integration: str | None = None,
+                       entity_id: Any = None, file_id: Any = None,
+                       is_upgrade: bool = False,
+                       event_type: str = "download",
+                       mode: str | None = None,
+                       payload: dict[str, Any] | None = None,
+                       **kwargs: Any) -> tuple[bool, str]:
+        """Durably accept one native Arr import before acknowledging it."""
+        # A webhook may be redelivered after a successful container change
+        # removed its original path.  Resolve idempotency before touching the
+        # filesystem so that completed imports still acknowledge cleanly.
+        key = self.workflow.dedupe_key(
+            path, provider, integration, entity_id, file_id, event_type,
+            payload)
+        existing = self.db.get_job(dedupe_key=key)
+        if existing is not None:
+            return True, f"already {existing['status']}"
+        p = Path(path)
+        if not p.exists():
+            return False, "file does not exist"
+        lib = self.cfg.library_for(path)
+        if lib is None:
+            return False, "no enabled library covers this path"
+        if mode:
+            resolve(self.cfg, lib, mode)
+
+        job, should_queue = self.workflow.accept(
+            path=path, provider=provider, integration=integration,
+            entity_id=entity_id, file_id=file_id, is_upgrade=is_upgrade,
+            event_type=event_type, mode=mode, payload=payload, **kwargs)
+        st = p.stat()
+        if self.db.get(path) is None:
+            self.db.upsert(path, size=st.st_size, mtime=st.st_mtime,
+                           status="pending", library=lib.id, reasons=[])
+        if not should_queue:
+            return True, f"already {job['status']}"
+        if not self._push_durable(job):
+            return True, "persisted behind active work"
+        return True, f"queued ({mode})" if mode else "queued"
+
     def cancel(self, path: str) -> tuple[bool, str]:
         """Cancel a running or queued file."""
         with self._lock:
@@ -231,6 +282,34 @@ class Engine:
         for path in paths:
             self.cancel(path)
         return len(paths)
+
+    def retry_workflow(self, job_id: int | None = None) -> int:
+        """Retry failed native imports from their exact failed stage."""
+        rows = self.db.list_jobs(status="failed", limit=100_000)
+        if job_id is not None:
+            rows = [row for row in rows if int(row["id"]) == int(job_id)]
+        retried = 0
+        for row in rows:
+            if row["stage"] == "processing":
+                fresh = self.db.update_job(
+                    row["id"], status="pending", retries=0,
+                    next_attempt=None, error=None, finished_at=None)
+                if fresh is not None:
+                    self._push_durable(fresh)
+            else:
+                count = self.db.retry_outbox(int(row["id"]))
+                if count:
+                    self.db.update_job(row["id"], status="waiting",
+                                       error=None, finished_at=None)
+                elif row["final_path"]:
+                    self.workflow.processing_succeeded(
+                        int(row["id"]), str(row["final_path"]),
+                        changed=row["stage"] == "arr_reconcile")
+                else:
+                    continue
+            retried += 1
+        self.workflow.wake()
+        return retried
 
     def check_one(self, path: str, mode: str | None = None) -> FilePlan:
         """Probe and plan a single file right now, and store the result.
@@ -480,15 +559,27 @@ class Engine:
                 continue
             try:
                 with self._lock:
+                    durable_id = self._durable_jobs.get(path)
+                durable = self.workflow.claim(durable_id) if durable_id else None
+                if durable is not None:
+                    with self._lock:
+                        if durable["mode"]:
+                            self._modes[path] = durable["mode"]
+                with self._lock:
                     cancelled = path in self._cancelled
                 if cancelled:
                     self.db.set_status(path, "pending")
+                    if durable_id:
+                        self.db.update_job(durable_id, status="cancelled",
+                                           error="cancelled")
                     log.info("skipped (cancelled before start): %s", path)
                 else:
-                    self._process_one(path)
-            except Exception:
+                    self._process_one(path, durable_id=durable_id)
+            except Exception as exc:
                 log.exception("unexpected error on %s", path)
                 self.db.upsert(path, status="failed", error="internal error")
+                if durable_id:
+                    self.workflow.processing_failed(durable_id, str(exc))
             finally:
                 self._queue.task_done()
                 with self._lock:
@@ -499,6 +590,25 @@ class Engine:
                     # share is the slowest part of the whole run.
                     self._active.pop(path, None)
                     self._modes.pop(path, None)
+                    self._durable_jobs.pop(path, None)
+                self._queue_next_durable(path)
+
+    def _push_durable(self, row: Any) -> bool:
+        path = str(row["source_path"])
+        with self._lock:
+            if path in self._queued:
+                return False
+            self._durable_jobs[path] = int(row["id"])
+            if row["mode"]:
+                self._modes[path] = str(row["mode"])
+        self._push(path)
+        return True
+
+    def _queue_next_durable(self, path: str) -> None:
+        for row in self.workflow.recoverable():
+            if str(row["source_path"]) == path:
+                self._push_durable(row)
+                return
 
     def _copy_back(self, job: ActiveJob, src: Path,
                    result: ffmpeg.EncodeResult, profile: Profile) -> bool:
@@ -558,10 +668,12 @@ class Engine:
             return None
         return result
 
-    def _process_one(self, path: str) -> str:
+    def _process_one(self, path: str, durable_id: int | None = None) -> str:
         p = Path(path)
         if not p.exists():
             self.db.upsert(path, status="skip", error="file disappeared")
+            if durable_id:
+                self.workflow.processing_failed(durable_id, "file disappeared")
             return "skip"
 
         lib = self.cfg.library_for(path)
@@ -569,6 +681,9 @@ class Engine:
             # The library was deleted, disabled or re-pointed since the scan.
             self.db.upsert(path, status="skip",
                            error="no enabled library covers this path")
+            if durable_id:
+                self.workflow.processing_failed(
+                    durable_id, "no enabled library covers this path")
             return "skip"
 
         # Re-plan immediately before encoding: a scan may be hours old and the
@@ -577,6 +692,8 @@ class Engine:
             probe = probe_file(p)
         except ProbeError as exc:
             self.db.upsert(path, status="failed", error=f"probe: {exc}")
+            if durable_id:
+                self.workflow.processing_failed(durable_id, f"probe: {exc}")
             return "failed"
 
         with self._lock:
@@ -591,6 +708,8 @@ class Engine:
             profile = resolve(self.cfg, lib, mode)
         except ConfigError as exc:
             self.db.upsert(path, status="failed", error=f"mode: {exc}")
+            if durable_id:
+                self.workflow.processing_failed(durable_id, f"mode: {exc}")
             return "failed"
 
         plan = plan_file(probe, profile, self.cfg)
@@ -599,6 +718,9 @@ class Engine:
         if not plan.needs_work:
             self._record(p, plan_file(probe, resolve(self.cfg, lib), self.cfg)
                          if mode else plan)
+            if durable_id:
+                self.workflow.processing_succeeded(
+                    durable_id, str(p), changed=False)
             return "skip"
 
         if self.cfg.dry_run:
@@ -606,6 +728,9 @@ class Engine:
                      f" [{mode}]" if mode else "", "; ".join(plan.reasons))
             self.db.upsert(path, status="pending",
                            error="dry run: not processed")
+            if durable_id:
+                self.workflow.processing_failed(
+                    durable_id, "dry run: not processed")
             return "pending"
 
         job = ActiveJob(path=path, started=time.time(), in_size=plan.size,
@@ -635,6 +760,9 @@ class Engine:
             if msg == "cancelled":
                 self.db.upsert(path, status="pending", error="cancelled")
                 self.db.finish_run(run_id, "cancelled", error="cancelled")
+                if durable_id:
+                    self.db.update_job(durable_id, status="cancelled",
+                                       error="cancelled")
                 log.info("cancelled: %s", p.name)
                 return "cancelled"
             row = self.db.get(path)
@@ -642,6 +770,8 @@ class Engine:
                 msg = f"{msg} (gave up after {MAX_ATTEMPTS} attempts)"
             self.db.upsert(path, status="failed", error=msg)
             self.db.finish_run(run_id, "failed", error=msg)
+            if durable_id:
+                self.workflow.processing_failed(durable_id, msg)
             log.error("encode failed for %s: %s", p.name, msg)
             return "failed"
 
@@ -654,6 +784,9 @@ class Engine:
             self.db.upsert(path, status="skip", error=note)
             self.db.finish_run(run_id, "rejected", result.in_size, result.out_size,
                                result.elapsed, note, detail)
+            if durable_id:
+                self.workflow.processing_succeeded(
+                    durable_id, path, changed=False)
             return "skip"
 
         # Set once the x265 pass was rejected for size and the run was rebuilt
@@ -680,6 +813,9 @@ class Engine:
                 self.db.finish_run(run_id, "rejected", result.in_size,
                                    result.out_size, result.elapsed, note, detail)
                 log.info("%s: %s", p.name, note)
+                if durable_id:
+                    self.workflow.processing_succeeded(
+                        durable_id, path, changed=False)
                 return "skip"
             rebuilt = note + ", kept the source video stream"
             result = retry
@@ -717,6 +853,9 @@ class Engine:
         self.db.finish_run(run_id, "done", result.in_size, result.out_size,
                            result.elapsed, rebuilt or None, detail,
                            final_path=str(final))
+        if durable_id:
+            self.workflow.processing_succeeded(
+                durable_id, str(final), changed=True)
         # Only now, with the verified encode in place of the original, is it
         # true to tell anyone else the file changed. `profile` and not `lib`,
         # so a mode can add or replace the callbacks for this one request -

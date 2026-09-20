@@ -1,7 +1,7 @@
 """Web panel: JSON API plus the static single-page UI.
 
-stdlib http.server on purpose - the API is a dozen endpoints with no auth and
-no templating, and staying dependency-free keeps the image small and the
+stdlib http.server on purpose - the API is a dozen dependency-free endpoints
+with a small API-key check and no templating, keeping the image small and the
 build reproducible.
 
 The panel is trusted-network only: there is no authentication, and the API
@@ -74,6 +74,27 @@ def _row(r: Any) -> dict[str, Any]:
     return d
 
 
+_ARR_IMPORT_EVENTS = frozenset({
+    "download", "import", "upgrade", "manualimport", "manual_import",
+})
+
+
+def _as_id(value: Any) -> Any:
+    """Keep Arr's numeric ids numeric while dropping empty placeholders."""
+    if value in (None, ""):
+        return None
+    return value
+
+
+def _nested(payload: dict[str, Any], *keys: str) -> Any:
+    """Return the first present value from a payload or one of its objects."""
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 class Handler(BaseHTTPRequestHandler):
     engine: Engine
     server_version = "transcoder"
@@ -116,7 +137,7 @@ class Handler(BaseHTTPRequestHandler):
     def _query(self) -> dict[str, str]:
         return {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
 
-    def _authorise(self) -> None:
+    def _authorise(self, instance_secret: str = "") -> None:
         """Check the API key on /api/ routes, if one is configured.
 
         The key exists so Sonarr and Radarr have a credential to present. It
@@ -124,13 +145,19 @@ class Handler(BaseHTTPRequestHandler):
         with the key embedded so the UI keeps working, which means anyone who
         can load the panel can read it. Keep the panel off the internet.
         """
-        want = (self.engine.cfg.web.api_key or "").strip()
-        if not want:
+        # The global key remains the normal credential.  A named Arr profile
+        # may additionally carry a secret, which is handy when several Arr
+        # instances share this process and no global key is desired.
+        wanted = [v for v in (
+            (self.engine.cfg.web.api_key or "").strip(),
+            (instance_secret or "").strip(),
+        ) if v]
+        if not wanted:
             return
         got = (self.headers.get("X-Api-Key")
                or self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
                or self._query().get("apikey", ""))
-        if not secrets.compare_digest(str(got), want):
+        if not any(secrets.compare_digest(str(got), want) for want in wanted):
             raise ApiError("invalid or missing API key", 401)
 
     def _int(self, q: dict[str, str], key: str, default: int,
@@ -181,6 +208,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib naming
         route = urlparse(self.path).path.rstrip("/") or "/"
         try:
+            native = self._native_route(route)
+            if native is not None:
+                # Native Arr requests need their body to select a named
+                # profile (instanceName is part of the webhook payload).  A
+                # request may use either the global key or that profile's
+                # secret.
+                body = self._body()
+                provider, instance_id = native
+                instance = self._arr_instance(
+                    provider or self._payload_provider(body),
+                    instance_id or self._payload_instance(body),
+                )
+                self._authorise(instance.secret if instance else "")
+                self._json(self.api_webhook(body, provider, instance_id,
+                                            instance=instance))
+                return
             handler = {
                 "/api/scan": self.api_scan,
                 "/api/check": self.api_check,
@@ -189,6 +232,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/cancel-all": self.api_cancel_all,
                 "/api/queue-pending": self.api_queue_pending,
                 "/api/retry": self.api_retry,
+                "/api/workflow/retry": self.api_workflow_retry,
                 "/api/schedule": self.api_schedule,
                 "/api/config": self.api_config_post,
                 "/api/history/clear": self.api_history_clear,
@@ -209,6 +253,38 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # pragma: no cover - defensive
             log.exception("POST %s failed", route)
             self._json({"error": f"internal error: {exc}"}, 500)
+
+    @staticmethod
+    def _native_route(route: str) -> tuple[str | None, str | None] | None:
+        """Recognise the canonical route and a couple of Arr-friendly aliases.
+
+        ``/api/webhook/{provider}/{instance}`` is the canonical form.  The
+        shorter ``/api/{provider}/webhook`` form is useful in Arr's UI, while
+        ``/api/integrations/{provider}/webhook/{instance}`` leaves room for
+        other integration families without changing this endpoint.
+        """
+        parts = [p for p in route.split("/") if p]
+        if parts in (["api", "webhook"], ["api", "webhooks"]):
+            return None, None
+        if len(parts) >= 3 and parts[:2] in (["api", "webhook"],
+                                             ["api", "webhooks"]):
+            provider = parts[2].lower()
+            if provider in ("sonarr", "radarr"):
+                return provider, parts[3] if len(parts) > 3 else None
+        if len(parts) >= 3 and parts[0:2] == ["api", "integrations"]:
+            provider = parts[2].lower()
+            if provider in ("sonarr", "radarr"):
+                if len(parts) > 3 and parts[3].lower() == "webhook":
+                    return provider, parts[4] if len(parts) > 4 else None
+                # Also accept /api/integrations/sonarr[/<instance>] as a
+                # compact form for clients that model the provider itself as
+                # the integration resource.
+                return provider, parts[3] if len(parts) > 3 else None
+        if len(parts) == 3 and parts[0] == "api" and parts[2].lower() == "webhook":
+            provider = parts[1].lower()
+            if provider in ("sonarr", "radarr"):
+                return provider, None
+        return None
 
     def _static(self, name: str, ctype: str) -> None:
         f = STATIC / name
@@ -293,6 +369,7 @@ class Handler(BaseHTTPRequestHandler):
                 "sent": eng.notifier.sent,
                 "failed": eng.notifier.failed,
             },
+            "workflow": eng.db.workflow_stats(),
             "queued": [{"path": p, "name": Path(p).name} for p in queued[:20]],
             "active": active,
             "recent": [_row(r) for r in recent],
@@ -342,6 +419,7 @@ class Handler(BaseHTTPRequestHandler):
     def api_config_get(self) -> dict[str, Any]:
         return {
             "schema": config_mod.schema(self.engine.cfg),
+            "integrations": config_mod.integration_schema(self.engine.cfg),
             "path": self.engine.config_path,
             "toml": config_mod.dump_toml(self.engine.cfg),
         }
@@ -401,6 +479,193 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(str(exc)) from None
         return {"ok": ok, "message": message, "path": path, "mode": mode or None}
 
+    # --- native Sonarr/Radarr webhooks ----------------------------------
+
+    def _payload_provider(self, body: dict[str, Any]) -> str | None:
+        raw = body.get("provider") or body.get("application")
+        if isinstance(raw, str):
+            raw = raw.strip().lower()
+            if raw in ("sonarr", "radarr"):
+                return raw
+        # A generic /api/webhook route can still identify native payloads
+        # without asking Arr to add a non-standard provider field.
+        if "series" in body or "episodeFile" in body:
+            return "sonarr"
+        if "movie" in body or "movieFile" in body:
+            return "radarr"
+        return None
+
+    def _payload_instance(self, body: dict[str, Any]) -> str | None:
+        raw = (body.get("integration") or body.get("instance")
+               or body.get("instanceName"))
+        return str(raw).strip() if raw not in (None, "") else None
+
+    def _arr_instance(self, provider: str | None,
+                      requested: str | None) -> Any:
+        provider = (provider or "").strip().lower()
+        if provider not in ("sonarr", "radarr"):
+            if requested:
+                raise ApiError("provider must be sonarr or radarr")
+            return None
+        instances = [i for i in self.engine.cfg.integrations.instances(provider)
+                     if i.enabled]
+        if requested:
+            wanted = requested.casefold()
+            found = next((i for i in instances
+                          if i.id.casefold() == wanted
+                          or i.name.casefold() == wanted), None)
+            if found is None:
+                raise ApiError(f"no such {provider} integration: {requested}", 404)
+            return found
+        if len(instances) == 1:
+            return instances[0]
+        if len(instances) > 1:
+            raise ApiError(f"integration is required for {provider}")
+        return None
+
+    def _native_fields(self, body: dict[str, Any], provider: str) -> dict[str, Any]:
+        """Extract stable fields from both current and older Arr payloads."""
+        event = str(body.get("eventType") or body.get("event") or "").strip()
+        lower = event.lower().replace(" ", "_")
+        entity = body.get("series") if provider == "sonarr" else body.get("movie")
+        entity = entity if isinstance(entity, dict) else {}
+        file_key = "episodeFile" if provider == "sonarr" else "movieFile"
+        file_obj = body.get(file_key)
+        file_obj = file_obj if isinstance(file_obj, dict) else {}
+
+        entity_id = _as_id(_nested(
+            body,
+            "seriesId" if provider == "sonarr" else "movieId",
+            "entityId",
+        ))
+        if entity_id is None:
+            entity_id = _as_id(entity.get("id"))
+        file_id = _as_id(_nested(
+            body,
+            "episodeFileId" if provider == "sonarr" else "movieFileId",
+            "fileId",
+        ))
+        if file_id is None:
+            file_id = _as_id(file_obj.get("id"))
+
+        final_path = _nested(
+            file_obj, "path", "absolutePath", "finalPath", "destinationPath"
+        )
+        if final_path is None:
+            final_path = _nested(
+                body,
+                "path", "finalPath", "destinationPath",
+                "episodeFilePath" if provider == "sonarr" else "movieFilePath",
+            )
+        return {
+            "event": event,
+            "event_type": lower,
+            "entity_id": entity_id,
+            "file_id": file_id,
+            "path": str(final_path) if final_path not in (None, "") else None,
+        }
+
+    def _enqueue_native(self, path: str, *, provider: str,
+                        integration: Any, fields: dict[str, Any],
+                        body: dict[str, Any]) -> tuple[bool, str]:
+        """Call a future import-aware engine API, falling back to enqueue()."""
+        mode = integration.mode if integration else ""
+        is_upgrade = fields["event_type"] == "upgrade" or bool(
+            body.get("isUpgrade") or body.get("isUpgradeFile"))
+        kwargs = {
+            "path": path,
+            "provider": provider,
+            "integration": integration.id if integration else None,
+            "entity_id": fields["entity_id"],
+            "file_id": fields["file_id"],
+            "is_upgrade": is_upgrade,
+            "event_type": fields["event_type"],
+            "mode": mode or None,
+            "payload": body,
+        }
+        method = next((getattr(self.engine, name, None) for name in (
+            "enqueue_import", "enqueue_integration", "enqueue_native_event",
+            "enqueue_arr",
+        ) if callable(getattr(self.engine, name, None))), None)
+        if callable(method):
+            try:
+                result = method(**kwargs)
+            except TypeError:
+                # Development compatibility for a positional implementation
+                # while the engine API settles.
+                try:
+                    result = method(path=path, provider=provider,
+                                    entity_id=fields["entity_id"],
+                                    file_id=fields["file_id"],
+                                    upgrade=is_upgrade, mode=mode or None)
+                except TypeError:
+                    try:
+                        result = method(final_path=path, provider=provider,
+                                        entity_id=fields["entity_id"],
+                                        file_id=fields["file_id"],
+                                        upgrade=is_upgrade, mode=mode or None)
+                    except TypeError:
+                        try:
+                            result = method(path, provider=provider,
+                                        entity_id=fields["entity_id"],
+                                        file_id=fields["file_id"],
+                                        is_upgrade=is_upgrade, mode=mode or None)
+                        except TypeError:
+                            result = method(path)
+        else:
+            result = self.engine.enqueue(path, force=is_upgrade,
+                                         mode=mode or None)
+
+        if isinstance(result, tuple):
+            return bool(result[0]), str(result[1]) if len(result) > 1 else "queued"
+        if isinstance(result, dict):
+            accepted = result.get("accepted", result.get("ok", result.get("queued")))
+            return bool(accepted), str(result.get("message", "queued"))
+        return bool(result), "queued" if result else "not accepted"
+
+    def api_webhook(self, body: dict[str, Any], provider_hint: str | None = None,
+                    instance_hint: str | None = None,
+                    *, instance: Any = None) -> dict[str, Any]:
+        provider = (provider_hint or self._payload_provider(body) or "").lower()
+        if provider not in ("sonarr", "radarr"):
+            raise ApiError("native webhook route must name sonarr or radarr")
+        instance = instance or self._arr_instance(
+            provider, instance_hint or self._payload_instance(body))
+        fields = self._native_fields(body, provider)
+        if fields["event_type"] not in _ARR_IMPORT_EVENTS:
+            return {
+                "ok": True, "accepted": False, "ignored": True,
+                "provider": provider, "integration": instance.id if instance else None,
+                "entity_id": fields["entity_id"], "file_id": fields["file_id"],
+                "entityId": fields["entity_id"], "fileId": fields["file_id"],
+                "path": fields["path"], "final_path": fields["path"],
+                "event": fields["event"],
+                "message": "event ignored (only import/download/upgrade events are queued)",
+            }
+        if not fields["path"]:
+            raise ApiError("native webhook has no final file path")
+        if fields["entity_id"] is None:
+            label = "series" if provider == "sonarr" else "movie"
+            raise ApiError(f"native webhook has no {label} id")
+        path = _norm(fields["path"])
+        if instance and instance.path_from and instance.path_to:
+            from .integrations import PathMapping
+            path = _norm(PathMapping(instance.path_from,
+                                     instance.path_to).to_local(path))
+        ok, message = self._enqueue_native(
+            path, provider=provider, integration=instance,
+            fields=fields, body=body)
+        if not ok:
+            raise ApiError(f"enqueue was not accepted: {message}", 409)
+        return {
+            "ok": True, "accepted": True, "queued": True,
+            "message": message, "provider": provider,
+            "integration": instance.id if instance else None,
+            "entity_id": fields["entity_id"], "file_id": fields["file_id"],
+            "entityId": fields["entity_id"], "fileId": fields["file_id"],
+            "path": path, "final_path": path, "event": fields["event"],
+        }
+
     def api_cancel(self, body: dict[str, Any]) -> dict[str, Any]:
         path = _norm(body.get("path"))
         ok, message = self.engine.cancel(path)
@@ -419,6 +684,15 @@ class Handler(BaseHTTPRequestHandler):
         n = self.engine.db.reset_attempts(_norm(raw) if raw else None)
         self.engine.enqueue_pending()
         return {"ok": True, "message": f"reset {n} file(s)"}
+
+    def api_workflow_retry(self, body: dict[str, Any]) -> dict[str, Any]:
+        raw = body.get("job_id")
+        try:
+            job_id = int(raw) if raw not in (None, "") else None
+        except (TypeError, ValueError):
+            raise ApiError("job_id must be a whole number") from None
+        n = self.engine.retry_workflow(job_id)
+        return {"ok": True, "message": f"retried {n} workflow job(s)"}
 
     def api_schedule(self, body: dict[str, Any]) -> dict[str, Any]:
         if "enabled" not in body:
@@ -450,6 +724,7 @@ class Handler(BaseHTTPRequestHandler):
             "changed": changed,
             "needs_restart": restart,
             "schema": config_mod.schema(self.engine.cfg),
+            "integrations": config_mod.integration_schema(self.engine.cfg),
             "toml": config_mod.dump_toml(self.engine.cfg),
         }
 

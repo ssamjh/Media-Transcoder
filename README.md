@@ -211,9 +211,101 @@ sample.mkv  TV       720p  h264 -> x265  2 kept  1 kept  579 KB
 
 ## Sonarr and Radarr
 
-`POST /api/process` queues a single file, which is the call to make from a
-Custom Script on import. It returns immediately — encoding happens on the
-workers, so the hook never blocks an import.
+The recommended chain is:
+
+```text
+download client -> Sonarr/Radarr import -> Media-Transcoder
+                -> Arr rescan + targeted rename -> AutoPulse -> Jellyfin
+```
+
+This deliberately starts **after the Arr import**. With copy imports (no hard
+links), Media-Transcoder changes only the library copy; the torrent payload
+stays untouched and can continue seeding. Do not put the transcoder between
+the download client and Arr, because then Arr has no settled, managed file to
+identify and recover.
+
+Create one Webhook connection in each Arr application pointing to
+`POST /api/webhook/sonarr/<id>` or `POST /api/webhook/radarr/<id>`, and select
+**On Import** and **On Upgrade**. Remove the direct Arr-to-AutoPulse hook for
+those events: Media-Transcoder calls AutoPulse only after the file and its Arr
+name are final.
+
+The native endpoint commits the request to SQLite before acknowledging it.
+The durable stages are independent:
+
+1. Process the imported library file (or record that it needed no work).
+2. If it changed, ask Arr to rescan the series/movie and rename only that file.
+3. Send the final path to AutoPulse's manual trigger.
+
+A restart resumes the current stage. Arr and AutoPulse failures use bounded
+backoff and remain visible as failed work; retry them with
+`POST /api/workflow/retry` without running FFmpeg again. Duplicate webhook
+deliveries are deduplicated. If a changed file cannot be reconciled with Arr,
+AutoPulse is not called with a stale filename.
+
+The endpoint accepts Arr's native `Download` payload, including upgrades, and
+extracts the series/movie id, file id, and final path. Rename, Test, Health,
+Grab, and other non-import events are acknowledged with `ignored: true` and do
+not enqueue work. Send the configured key as `X-Api-Key` (or use an
+`Authorization: Bearer ...` header).
+
+When more than one instance of a provider is configured, address the named
+profile explicitly. The `instanceName` in an Arr payload is also matched to
+the configured profile name. A profile selects a one-shot mode, supplies the
+outbound Arr connection, and may have its own inbound `secret`:
+
+```toml
+[[integrations.sonarr]]
+id = "tv"
+name = "TV Sonarr"
+mode = "cleanup"
+url = "http://sonarr:8989"
+api_key = "sonarr-api-key"
+path_from = "/arr/media"
+path_to = "/media"
+request_timeout = 15.0
+command_timeout = 300.0
+poll_interval = 2.0
+max_retries = 3
+secret = "replace-with-a-long-random-value"
+
+[[integrations.radarr]]
+id = "movies"
+name = "Movies Radarr"
+mode = "cleanup"
+url = "http://radarr:7878"
+api_key = "radarr-api-key"
+path_from = "/arr/media"
+path_to = "/media"
+request_timeout = 15.0
+command_timeout = 300.0
+poll_interval = 2.0
+max_retries = 3
+secret = "replace-with-a-long-random-value"
+
+[integrations.autopulse]
+enabled = true
+url = "http://autopulse:2875"
+username = "autopulse-user"
+password = "autopulse-password"
+trigger_endpoint = "/triggers/manual"
+timeout = 15.0
+max_retries = 3
+```
+
+`path_from` is the prefix Arr writes into its webhook/API paths; `path_to` is
+the same directory as mounted in Media-Transcoder. Set both or neither. The
+Arr `url` and `api_key` are required for the rescan/rename stage. AutoPulse is
+optional; when disabled, the workflow completes after Arr reconciliation.
+Secrets are stored as ordinary TOML strings and no third-party package is
+required. Keep the panel on a trusted network: its global API key is embedded
+in the panel page and authenticates integrations rather than making the panel
+an internet-safe boundary.
+
+For simple integrations that do not need durable Arr reconciliation,
+`POST /api/process` still queues a single file. The legacy custom-script hook
+returns immediately, but it does not carry the Arr identity required by the
+rescan/rename workflow.
 
 ```sh
 #!/bin/sh
@@ -253,7 +345,8 @@ docker compose run --rm transcoder modes -m subs-only \
 
 ### Telling Jellyfin afterwards
 
-Sonarr calls the transcoder on import; the transcoder calls whoever is next.
+The durable AutoPulse hand-off above is the preferred import path. Modes also
+have generic notification hooks for unrelated services and scheduled work.
 Turn **Notifications** on for a mode and list one URL per line:
 
 ```toml
@@ -286,7 +379,9 @@ Everything is queued on one background thread, so a bulk import that finishes
 twenty files at once queues sixty calls and drains them without holding up a
 single encode. Timeouts, connection errors and 5xx are retried with a growing
 delay; a 4xx is not, because it will not start working. **Delivery is best
-effort**: a webhook that never succeeds is logged and dropped. The file on
+effort**: a generic mode webhook that never succeeds is logged and dropped.
+This does not apply to the native Arr/AutoPulse outbox, whose failure is kept
+for an explicit retry. The file on
 disk is already correct, and the transcoder's state must not depend on
 somebody else answering.
 

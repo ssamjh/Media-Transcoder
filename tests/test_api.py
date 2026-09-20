@@ -459,6 +459,49 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNone(d["mode"])
 
+    def test_native_sonarr_webhook_extracts_ids_and_waits_for_enqueue(self):
+        path = Path(self.tmp.name) / "media" / "TV" / "native.mkv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+        calls = []
+        self.engine.enqueue_import = lambda **kwargs: (
+            calls.append(kwargs) or (True, "accepted"))
+        self.addCleanup(lambda: delattr(self.engine, "enqueue_import")
+                        if hasattr(self.engine, "enqueue_import") else None)
+        d, status = self.post("/api/webhook/sonarr", {
+            "eventType": "Download", "isUpgrade": True,
+            "series": {"id": 42},
+            "episodeFile": {"id": 7, "path": str(path)},
+        })
+        self.assertEqual(status, 200, d)
+        self.assertTrue(d["accepted"])
+        self.assertEqual(d["provider"], "sonarr")
+        self.assertEqual(d["entity_id"], 42)
+        self.assertEqual(d["file_id"], 7)
+        self.assertEqual(d["path"], str(path))
+        self.assertTrue(calls[0]["is_upgrade"])
+
+    def test_native_non_import_event_is_acknowledged_without_enqueue(self):
+        calls = []
+        self.engine.enqueue_import = lambda **kwargs: calls.append(kwargs)
+        self.addCleanup(lambda: delattr(self.engine, "enqueue_import")
+                        if hasattr(self.engine, "enqueue_import") else None)
+        d, status = self.post("/api/webhook/radarr", {
+            "eventType": "Test", "movie": {"id": 9},
+            "movieFile": {"id": 3, "path": "/media/Movies/x.mkv"},
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(d["ignored"])
+        self.assertFalse(calls)
+
+    def test_native_import_requires_arr_entity_id(self):
+        d, status = self.post("/api/webhook/sonarr", {
+            "eventType": "Download",
+            "episodeFile": {"id": 7, "path": self.A},
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("series id", d["error"])
+
     def test_process_requires_a_path_before_a_mode(self):
         _, status = self.post("/api/process", {"mode": "cleanup"})
         self.assertEqual(status, 400)

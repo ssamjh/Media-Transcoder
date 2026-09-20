@@ -140,6 +140,25 @@ class TestRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(cfgmod.load(Path(d) / "absent.toml"), Config())
 
+    def test_named_integrations_and_secrets_survive_round_trip(self):
+        c = Config()
+        c.integrations.sonarr = [cfgmod.ArrInstanceCfg(
+            id="tv", name="TV Sonarr", url="http://sonarr:8989",
+            api_key="arr-key", path_from="/media", path_to="/library",
+            request_timeout=12.0, command_timeout=45.0, poll_interval=1.5,
+            max_retries=4, secret="webhook-secret")]
+        c.integrations.autopulse = cfgmod.AutoPulseCfg(
+            enabled=True, url="http://autopulse", username="u",
+            password="p", trigger_endpoint="/triggers/manual",
+            max_retries=5)
+        back = cfgmod.loads(cfgmod.dump_toml(c))
+        self.assertEqual(back, c)
+        redacted = cfgmod.integration_schema(c)
+        self.assertTrue(redacted["sonarr"][0]["api_key_configured"])
+        self.assertNotIn("arr-key", str(redacted))
+        self.assertTrue(redacted["autopulse"]["password_configured"])
+        self.assertNotIn("p", redacted["autopulse"])
+
 
 class TestLibraries(unittest.TestCase):
     def test_add_generates_a_unique_slug(self):
@@ -359,6 +378,26 @@ class TestValidation(unittest.TestCase):
     def test_rejects_empty_library_paths(self):
         with self.assertRaises(ConfigError):
             cfgmod.apply_library_updates(self.c, self.lib, {"paths": []})
+
+    def test_rejects_invalid_integration_timeouts_and_retries(self):
+        self.c.integrations.sonarr = [cfgmod.ArrInstanceCfg(
+            id="tv", request_timeout=0.0)]
+        with self.assertRaises(ConfigError):
+            cfgmod._validate_global(self.c)
+        self.c.integrations.sonarr[0].request_timeout = 15.0
+        self.c.integrations.sonarr[0].max_retries = 11
+        with self.assertRaises(ConfigError):
+            cfgmod._validate_global(self.c)
+
+    def test_rejects_incomplete_paths_and_enabled_autopulse_without_url(self):
+        self.c.integrations.sonarr = [cfgmod.ArrInstanceCfg(
+            id="tv", path_from="/arr/media")]
+        with self.assertRaises(ConfigError):
+            cfgmod._validate_global(self.c)
+        self.c.integrations.sonarr = []
+        self.c.integrations.autopulse.enabled = True
+        with self.assertRaises(ConfigError):
+            cfgmod._validate_global(self.c)
 
     def test_nothing_is_applied_when_one_field_fails(self):
         before = self.mode.video.crf_720p

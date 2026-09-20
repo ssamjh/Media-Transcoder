@@ -9,6 +9,8 @@ and no ffmpeg are involved.
 from __future__ import annotations
 
 import os
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,3 +97,97 @@ class HistoryPathRepairTest(unittest.TestCase):
                 self.assertEqual(run["name"], "Film.mkv")
             finally:
                 reopened.close()
+
+
+class DurableWorkTest(unittest.TestCase):
+    """Import/work state survives duplicate hooks and process restarts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "state.db"
+        self.db = Db(self.path)
+        self.addCleanup(self.db.close)
+
+    def test_job_is_deduplicated_and_updated_by_path(self):
+        job = self.db.create_job(
+            "sonarr:episode-1", "/media/TV/episode.mkv", provider="sonarr",
+            metadata={"series_id": 42}, mode_id="import", now=10.0,
+        )
+        same = self.db.create_job(
+            "sonarr:episode-1", "/media/TV/episode.mkv", metadata={"retry": 1},
+            now=11.0,
+        )
+        self.assertEqual(job["id"], same["id"])
+        self.assertEqual(self.db.get_job(source_path="/media/TV/episode.mkv")["id"],
+                         job["id"])
+        self.assertEqual(same["mode"], "import")
+        self.assertEqual(json.loads(same["source_metadata"]), {"retry": 1})
+
+        claimed = self.db.claim_job(dedupe_key="sonarr:episode-1", now=12.0)
+        self.assertEqual(claimed["status"], "running")
+        self.assertEqual(claimed["retries"], 1)
+        finished = self.db.finish_job(
+            claimed["id"], final_path="/media/TV/episode-clean.mkv"
+        )
+        self.assertEqual(finished["status"], "done")
+        self.assertEqual(finished["final_path"], "/media/TV/episode-clean.mkv")
+
+    def test_import_request_and_outbox_are_durable(self):
+        request = self.db.create_import_request(
+            "radarr:movie-1", "/media/Movies/movie.mkv", provider="radarr",
+            metadata={"movie_id": 1}, mode="import", now=20.0,
+        )
+        self.assertEqual(self.db.get_import_request("radarr:movie-1")["id"],
+                         request["id"])
+        action = self.db.enqueue_outbox(
+            "radarr:movie-1", "refresh", {"path": "/media/Movies/movie.mkv"},
+            now=21.0,
+        )
+        self.assertEqual(
+            self.db.enqueue_outbox("radarr:movie-1", "refresh")["id"], action["id"]
+        )
+        claimed = self.db.claim_outbox(now=22.0)
+        self.assertEqual(claimed["status"], "running")
+        self.assertEqual(claimed["retries"], 1)
+        completed = self.db.complete_outbox(claimed["id"], now=23.0)
+        self.assertEqual(completed["status"], "done")
+        self.assertEqual(json.loads(completed["payload"])["path"],
+                         "/media/Movies/movie.mkv")
+
+    def test_running_work_is_retryable_after_reopen(self):
+        job = self.db.create_job("restart-job", "/media/a.mkv")
+        self.db.claim_job(job["id"], now=30.0)
+        action = self.db.enqueue_outbox("restart-job", "notify")
+        self.db.claim_outbox(now=30.0)
+        self.db.close()
+        self.db = Db(self.path)
+        self.addCleanup(self.db.close)
+        self.assertEqual(self.db.get_job(job["id"])["status"], "pending")
+        self.assertEqual(self.db.get_outbox(action["id"])["status"], "pending")
+        self.assertIsNotNone(self.db.get_job(job["id"])["next_attempt"])
+
+    def test_partial_durable_tables_migrate_without_dropping_rows(self):
+        self.db.close()
+        self.path.unlink(missing_ok=True)
+        Path(str(self.path) + "-wal").unlink(missing_ok=True)
+        Path(str(self.path) + "-shm").unlink(missing_ok=True)
+        conn = sqlite3.connect(self.path)
+        conn.executescript(
+            "CREATE TABLE processing_jobs (id INTEGER PRIMARY KEY, "
+            "dedupe_key TEXT, source_path TEXT);"
+            "INSERT INTO processing_jobs VALUES (1, 'old', '/media/old.mkv');"
+            "CREATE TABLE import_requests (id INTEGER PRIMARY KEY, "
+            "dedupe_key TEXT, source_path TEXT);"
+            "CREATE TABLE outbox_actions (id INTEGER PRIMARY KEY, "
+            "dedupe_key TEXT, action TEXT);"
+        )
+        conn.commit()
+        conn.close()
+        self.db = Db(self.path)
+        self.addCleanup(self.db.close)
+        row = self.db.get_job("old")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["source_path"], "/media/old.mkv")
+        self.assertIn("next_attempt", row.keys())
+        self.assertIsNotNone(self.db.create_job("new", "/media/new.mkv"))
