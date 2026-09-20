@@ -384,6 +384,25 @@ class ApiTest(unittest.TestCase):
         _, status = self.post("/api/scan", {"library": "nope"})
         self.assertEqual(status, 404)
 
+    def test_backups_endpoint_lists_and_takes_snapshots(self):
+        d, _ = self.get("/api/backups")
+        self.assertEqual(d["backups"], [])
+        self.assertEqual(d["keep"], 7)
+
+        d, _ = self.post("/api/backups/run", {})
+        self.assertTrue(d["ok"])
+        self.assertTrue(Path(d["path"]).is_file())
+        self.assertEqual(len(d["backups"]), 1)
+
+        # Taking one twice on the same day refreshes it, it does not spend a
+        # day of the retention window.
+        self.post("/api/backups/run", {})
+        d, _ = self.get("/api/backups")
+        self.assertEqual(len(d["backups"]), 1)
+
+        status, _ = self.get("/api/status")
+        self.assertEqual(status["backup"]["count"], 1)
+
     def test_status_lists_libraries(self):
         d, _ = self.get("/api/status")
         self.assertEqual([l["id"] for l in d["libraries"]], ["tv", "movies"])

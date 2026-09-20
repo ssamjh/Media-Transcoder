@@ -15,6 +15,7 @@ import copy
 import json
 import logging
 import secrets
+import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from . import backup
 from . import config as config_mod
 from . import notify as notify_mod
 from .config import Config, ConfigError
@@ -192,6 +194,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/config": self.api_config_get,
                 "/api/libraries": self.api_libraries,
                 "/api/modes": self.api_modes,
+                "/api/backups": self.api_backups,
             }.get(route)
             if handler is None:
                 raise ApiError("not found", 404)
@@ -243,6 +246,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/modes/update": self.api_mode_update,
                 "/api/modes/delete": self.api_mode_delete,
                 "/api/notify/test": self.api_notify_test,
+                "/api/backups/run": self.api_backup_run,
             }.get(route)
             if handler is None:
                 raise ApiError("not found", 404)
@@ -370,12 +374,48 @@ class Handler(BaseHTTPRequestHandler):
                 "failed": eng.notifier.failed,
             },
             "workflow": eng.db.workflow_stats(),
+            "backup": self._backup_status(),
             "queued": [{"path": p, "name": Path(p).name} for p in queued[:20]],
             "active": active,
             "recent": [_row(r) for r in recent],
             "now": now,
             **stats,
         }
+
+    def _backup_status(self) -> dict[str, Any]:
+        eng = self.engine
+        cfg = eng.cfg.backup
+        found = backup.list_backups(backup.backup_dir(eng.cfg))
+        return {
+            "enabled": cfg.enabled,
+            "keep": cfg.keep,
+            "interval_hours": cfg.interval_hours,
+            "count": len(found),
+            "last": found[-1].stat().st_mtime if found else 0.0,
+            "next": eng.next_backup,
+        }
+
+    def api_backups(self) -> dict[str, Any]:
+        directory = backup.backup_dir(self.engine.cfg)
+        found = backup.list_backups(directory)
+        return {
+            "dir": str(directory),
+            **self._backup_status(),
+            # Newest first: the one anybody restoring is looking for.
+            "backups": [
+                {"name": f.name, "path": str(f), "size": f.stat().st_size,
+                 "taken": f.stat().st_mtime}
+                for f in reversed(found)
+            ],
+        }
+
+    def api_backup_run(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Take a snapshot now. Replaces today's, it does not add to it."""
+        try:
+            path = self.engine.backup_now()
+        except (OSError, sqlite3.Error) as exc:
+            raise ApiError(f"backup failed: {exc}", 500)
+        return {"ok": True, "path": str(path), **self.api_backups()}
 
     def api_files(self) -> dict[str, Any]:
         q = self._query()

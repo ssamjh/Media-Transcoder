@@ -1078,8 +1078,8 @@ function renderIntegration() {
       <div class="field">
         <div><div class="desc">Sent as an <code>X-Api-Key</code> header or an
           <code>?apikey=</code> parameter on every <code>/api/</code> request.
-          The panel embeds it, so anyone who can load this page can read it —
-          it authenticates Sonarr and Radarr, it does not make the panel safe
+          The panel embeds it, so anyone who can load this page can read it.
+          It authenticates Sonarr and Radarr, it does not make the panel safe
           to expose.</div></div>
         <div class="ctl">
           <input type="text" id="int-key" value="${esc(KEY || "(no key set)")}" readonly>
@@ -1089,7 +1089,7 @@ function renderIntegration() {
       <h3>Process a file on import</h3>
       <div class="field">
         <div><div class="desc">Queues one file. <code>mode</code> is optional and
-          applies to that run only — the next scheduled scan plans the file under
+          applies to that run only. The next scheduled scan plans the file under
           its library's normal profile again. Known modes: ${list}.</div></div>
         <div class="ctl"><pre class="toml">${esc(script)}</pre></div>
       </div>

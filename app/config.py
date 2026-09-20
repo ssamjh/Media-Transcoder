@@ -241,6 +241,20 @@ class ScheduleCfg:
 
 
 @dataclass
+class BackupCfg:
+    # The state database is the only thing here that cannot be rebuilt by
+    # rescanning, so a snapshot a day is kept next to it and the last week
+    # survives. One file per day, so "keep 7" is seven days of history
+    # whatever the interval or the restart count.
+    enabled: bool = True
+    interval_hours: float = 24.0
+    keep: int = 7
+    # Empty means a "backups" directory beside the state database, which is
+    # the config directory - the one place already mounted and writable.
+    dir: str = ""
+
+
+@dataclass
 class WorkersCfg:
     # Sized for an ordinary 8-thread host: 2 x 4 keeps every thread busy
     # without oversubscribing. Raise both together on a bigger box.
@@ -326,6 +340,7 @@ class Config:
     state_db: str = "/config/state.db"
     dry_run: bool = False
     schedule: ScheduleCfg = field(default_factory=ScheduleCfg)
+    backup: BackupCfg = field(default_factory=BackupCfg)
     workers: WorkersCfg = field(default_factory=WorkersCfg)
     output: OutputCfg = field(default_factory=OutputCfg)
     web: WebCfg = field(default_factory=WebCfg)
@@ -365,6 +380,7 @@ class Config:
 SECTIONS: dict[str, str] = {
     "": "General",
     "schedule": "Schedule",
+    "backup": "Backups",
     "workers": "Workers",
     "output": "Encoding",
     "web": "Web panel",
@@ -397,6 +413,23 @@ META: dict[str, dict[str, Any]] = {
         "desc": "Queue everything a scan finds, instead of leaving it pending "
                 "for you to review and queue yourself. Off means no file is "
                 "ever encoded without being asked for."},
+
+    "backup.enabled": {
+        "desc": "Keep daily snapshots of the state database. The snapshot is "
+                "taken through SQLite's backup API, so it is safe to take "
+                "while files are being encoded."},
+    "backup.interval_hours": {
+        "desc": "Hours between snapshots. One file is kept per day, so a "
+                "shorter interval refreshes the day's snapshot rather than "
+                "keeping more of them.",
+        "min": 0.25, "max": 720},
+    "backup.keep": {
+        "desc": "How many daily snapshots to keep. The oldest is deleted "
+                "once there are more than this.",
+        "min": 1, "max": 365},
+    "backup.dir": {
+        "desc": "Where to write snapshots. Empty means a backups directory "
+                "beside the state database."},
 
     "workers.count": {
         "desc": "How many files to encode at once, across all libraries.",
@@ -906,6 +939,10 @@ def apply_mode_updates(cfg: Config, mode: ModeCfg,
 
 
 def _validate_global(cfg: Config) -> None:
+    if not (0.25 <= cfg.backup.interval_hours <= 720):
+        raise ConfigError("backup.interval_hours must be between 0.25 and 720")
+    if not (1 <= cfg.backup.keep <= 365):
+        raise ConfigError("backup.keep must be between 1 and 365")
     ids = [l.id for l in cfg.libraries]
     if len(set(ids)) != len(ids):
         raise ConfigError("library ids must be unique")

@@ -328,6 +328,30 @@ class Db:
         with self._lock:
             self._conn.close()
 
+    def backup_to(self, dest: str | Path) -> None:
+        """Write a consistent snapshot of this database to `dest`.
+
+        SQLite's own backup API, not a file copy: with WAL journalling the
+        file on disk is only half the state, so copying it while anything
+        is mid-transaction produces exactly the corrupt database a backup
+        is supposed to insure against. This also means the snapshot needs
+        no sidecar files of its own. The write happens under the same lock
+        every other statement takes, so a worker cannot commit into the
+        middle of it.
+        """
+        target = sqlite3.connect(str(dest))
+        try:
+            with self._lock:
+                self._conn.backup(target)
+            # The snapshot inherits this database's WAL mode, and a WAL
+            # database is not one file: anything that reads it drops a -wal
+            # and a -shm beside it, and copying it away without them loses
+            # data. A snapshot is an archive, never a live database, so it
+            # is switched to a rollback journal and stays self-contained.
+            target.execute("PRAGMA journal_mode=DELETE")
+        finally:
+            target.close()
+
     # --- file state -------------------------------------------------------
 
     def get(self, path: str) -> sqlite3.Row | None:

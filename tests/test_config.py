@@ -41,7 +41,7 @@ def mode_of(c: Config, lib_id: str = "media"):
 def three_libraries() -> Config:
     c = one_library("/media/TV", "TV")
     for name, paths in [("Movies", ["/media/Movies"]),
-                        ("Home Video", ["/media/Home", "/media/Camera"])]:
+                        ("Movies 4K", ["/media/Movies-4K", "/media/TV-4K"])]:
         cfgmod.add_library(c, name, paths).enabled = True
     return c
 
@@ -63,7 +63,7 @@ class TestRoundTrip(unittest.TestCase):
                     "audio.keep_stereo_only": True}),
             ("movies", {"video.enabled": False, "output.container": "keep",
                         "audio.stereo_bitrate": "192k"}),
-            ("home-video", {"audio.enabled": False,
+            ("movies-4k", {"audio.enabled": False,
                             "output.replace_original": False}),
         ]:
             lib = c.library(lib_id)
@@ -71,7 +71,7 @@ class TestRoundTrip(unittest.TestCase):
             lib.mode = cfgmod.add_mode(c, f"{lib.name} mode",
                                        copy_from="standard").id
             cfgmod.apply_mode_updates(c, c.mode(lib.mode), updates)
-        cfgmod.apply_library_updates(c, c.library("home-video"),
+        cfgmod.apply_library_updates(c, c.library("movies-4k"),
                                      {"enabled": False})
 
         back = cfgmod.loads(cfgmod.dump_toml(c))
@@ -79,7 +79,7 @@ class TestRoundTrip(unittest.TestCase):
         self.assertFalse(mode_of(back, "movies").video.enabled)
         self.assertFalse(mode_of(back, "tv").subtitles.enabled)
         self.assertEqual(mode_of(back, "movies").output.container, "keep")
-        self.assertFalse(back.library("home-video").enabled)
+        self.assertFalse(back.library("movies-4k").enabled)
 
     def test_modified_global_values_survive(self):
         c = Config()
@@ -232,12 +232,12 @@ class TestLibraries(unittest.TestCase):
     def test_active_libraries_excludes_disabled(self):
         c = three_libraries()
         c.library("movies").enabled = False
-        self.assertEqual([l.id for l in c.active_libraries], ["tv", "home-video"])
+        self.assertEqual([l.id for l in c.active_libraries], ["tv", "movies-4k"])
 
     def test_library_for_handles_multiple_roots(self):
         c = three_libraries()
-        self.assertEqual(c.library_for("/media/Camera/clip.mp4").id, "home-video")
-        self.assertEqual(c.library_for("/media/Home/x/y.mkv").id, "home-video")
+        self.assertEqual(c.library_for("/media/TV-4K/S01/E01.mkv").id, "movies-4k")
+        self.assertEqual(c.library_for("/media/Movies-4K/Film/film.mkv").id, "movies-4k")
 
 
 class TestMigration(unittest.TestCase):

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import ffmpeg, notify
+from . import backup, ffmpeg, notify
 from .config import Config, ConfigError, LibraryCfg, Profile, resolve
 from .db import Db
 from .plan import FilePlan, plan_file
@@ -27,6 +27,12 @@ from .workflow import Workflow
 log = logging.getLogger("transcoder")
 
 MAX_ATTEMPTS = 3
+
+# The backup thread wakes often enough to notice a setting changed in the
+# panel, and waits an hour before trying again after a failure so a
+# read-only backup directory cannot fill the log a line at a time.
+BACKUP_TICK = 60.0
+BACKUP_RETRY = 3600.0
 
 
 @dataclass
@@ -107,6 +113,8 @@ class Engine:
         self.last_scan: float = 0.0
         self.last_scan_summary: dict[str, Any] = {}
         self.next_scan: float = 0.0
+        self.last_backup: float = 0.0
+        self.next_backup: float = 0.0
         self.started_at = time.time()
 
     # --- lifecycle --------------------------------------------------------
@@ -132,6 +140,13 @@ class Engine:
             t.start()
             self._threads.append(t)
         t = threading.Thread(target=self._scheduler_loop, name="scheduler",
+                             daemon=True)
+        t.start()
+        self._threads.append(t)
+        # Always started, even with backups switched off: the loop reads the
+        # setting each tick, so turning them on in the panel takes effect
+        # without a restart.
+        t = threading.Thread(target=self._backup_loop, name="backup",
                              daemon=True)
         t.start()
         self._threads.append(t)
@@ -550,6 +565,41 @@ class Engine:
                     if self.cfg.schedule.enabled else 0.0
                 )
             self._stop.wait(1.0)
+
+    def backup_now(self) -> Path:
+        """Snapshot the state database and prune old ones. Returns its path."""
+        path = backup.run(self.db, self.cfg)
+        self.last_backup = time.time()
+        self.next_backup = backup.next_due(
+            backup.backup_dir(self.cfg), self.cfg.backup.interval_hours)
+        return path
+
+    def _backup_loop(self) -> None:
+        """One snapshot of the state database per configured interval.
+
+        Its own thread rather than a step in the scheduler, because a scan
+        can run for hours and the backup should not queue behind it. What is
+        owed is decided from the newest file on disk (see backup.next_due),
+        so restarting the daemon does not take an extra snapshot and a
+        daemon that is never up at midnight still gets one a day.
+        """
+        retry_after = 0.0
+        while not self._stop.is_set():
+            cfg = self.cfg.backup
+            directory = backup.backup_dir(self.cfg)
+            if cfg.enabled:
+                self.next_backup = backup.next_due(directory, cfg.interval_hours)
+                now = time.time()
+                if now >= self.next_backup and now >= retry_after:
+                    try:
+                        path = self.backup_now()
+                        log.info("state database backed up to %s", path)
+                    except Exception:
+                        log.exception("state database backup failed")
+                        retry_after = time.time() + BACKUP_RETRY
+            else:
+                self.next_backup = 0.0
+            self._stop.wait(BACKUP_TICK)
 
     def _worker_loop(self) -> None:
         while not self._stop.is_set():

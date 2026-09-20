@@ -8,10 +8,12 @@ import logging
 import os
 import secrets
 import signal
+import sqlite3
 import sys
 import time
 from pathlib import Path
 
+from . import backup as backup_mod
 from . import config as config_mod
 from .db import Db
 from .engine import Engine, hms
@@ -157,6 +159,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("process", help="process one file now")
     p.add_argument("path")
     p.add_argument("-m", "--mode", help="apply this mode for this run only")
+
+    p = sub.add_parser("backup", help="snapshot the state database, or restore one")
+    p.add_argument("--list", action="store_true", dest="list_only",
+                   help="list the snapshots that exist and do nothing else")
+    p.add_argument("--restore", metavar="FILE",
+                   help="replace the state database with this snapshot "
+                        "(stop the daemon first)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
 
     p = sub.add_parser("status", help="print stored state")
     p.add_argument("--failed", action="store_true", help="list failures")
@@ -459,6 +469,56 @@ def _libraries(args, cfg, log) -> int:
     return 0
 
 
+def _backup(args, cfg, db, engine: Engine, log) -> int:
+    directory = backup_mod.backup_dir(cfg)
+
+    if args.restore:
+        # The database has to be closed before its file is replaced, and
+        # nothing may reopen it in this process afterwards - main() calls
+        # db.close() again, which is harmless.
+        db.close()
+        try:
+            kept = backup_mod.restore(args.restore, cfg.state_db)
+        except (ValueError, OSError) as exc:
+            log.error("%s", exc)
+            return 2
+        print(f"restored {args.restore} to {cfg.state_db}")
+        if kept:
+            print(f"previous database kept at {kept}")
+        return 0
+
+    if not args.list_only:
+        try:
+            path = engine.backup_now()
+        except (OSError, sqlite3.Error) as exc:
+            log.error("backup failed: %s", exc)
+            return 2
+        if not args.json:
+            print(f"wrote {path}")
+
+    found = backup_mod.list_backups(directory)
+    if args.json:
+        print(json.dumps({
+            "dir": str(directory),
+            "keep": cfg.backup.keep,
+            "backups": [{"path": str(f), "name": f.name,
+                         "size": f.stat().st_size,
+                         "taken": f.stat().st_mtime} for f in reversed(found)],
+        }, indent=2))
+        return 0
+
+    if not found:
+        print(f"no backups in {directory}")
+        return 0
+    print(_table([[f.name, _size(f.stat().st_size),
+                   time.strftime("%Y-%m-%d %H:%M", time.localtime(f.stat().st_mtime))]
+                  for f in reversed(found)],
+                 ["File", "Size", "Taken"]))
+    print("")
+    print(f"{len(found)} of {cfg.backup.keep} kept in {directory}")
+    return 0
+
+
 def _dispatch(args, cfg, db, engine: Engine, log) -> int:
     if args.cmd == "daemon":
         httpd = None
@@ -529,6 +589,9 @@ def _dispatch(args, cfg, db, engine: Engine, log) -> int:
         engine.join()
         return 0
 
+    if args.cmd == "backup":
+        return _backup(args, cfg, db, engine, log)
+
     if args.cmd == "status":
         stats = db.stats()
         print(f"tracked : {stats['total']}")
@@ -538,6 +601,14 @@ def _dispatch(args, cfg, db, engine: Engine, log) -> int:
         print(f"encoded : {stats['encoded']}")
         print(f"saved   : {_size(stats['bytes_saved'])}")
         print(f"spent   : {hms(stats['encode_seconds'])} encoding")
+        snapshots = backup_mod.list_backups(backup_mod.backup_dir(cfg))
+        if snapshots:
+            taken = time.strftime(
+                "%Y-%m-%d %H:%M",
+                time.localtime(snapshots[-1].stat().st_mtime))
+            print(f"backups : {len(snapshots)} kept, newest {taken}")
+        else:
+            print("backups : none yet")
         if args.failed:
             rows, _ = db.list_files(status="failed", limit=500)
             print()
