@@ -288,7 +288,6 @@ class TestAudio(Base):
         # The commentary is kept, but the downmix comes off the 5.1 master.
         self.assertEqual(audio[0].codec, ENCODER)
         self.assertEqual(audio[0].src_index, 1)
-        self.assertEqual(audio[0].title, "Stereo")
         self.assertIn(2, [s.src_index for s in audio])
 
     def test_reuses_existing_stereo_instead_of_rebuilding(self):
@@ -304,33 +303,28 @@ class TestAudio(Base):
         self.assertEqual(len(self.kinds(p, "audio")), 1)
         self.assertFalse(p.needs_work)
 
-    def test_an_adopted_stereo_track_is_named(self):
-        """A downmix we encode is titled; one we adopt has to be too."""
+    def test_an_unnamed_adopted_stereo_track_needs_no_rename(self):
         p = self.plan([V(0, "hevc"), A(1, "aac", 2, "eng", default=1)])
         track = self.kinds(p, "audio")[0]
         self.assertEqual(track.codec, "copy")
-        self.assertEqual(track.title, "Stereo")
-        self.assertIn("name the stereo track", p.reasons)
+        self.assertFalse(p.needs_work, p.reasons)
 
-    def test_naming_the_stereo_track_is_idempotent(self):
-        """Or every scan would find the same work on the same file forever."""
+    def test_an_existing_stereo_title_is_not_rewritten(self):
         p = self.plan([V(0, "hevc"),
                        A(1, "aac", 2, "eng", title="Stereo", default=1)])
-        self.assertIsNone(self.kinds(p, "audio")[0].title)
         self.assertNotIn("name the stereo track", p.reasons)
 
-    def test_a_title_that_already_says_stereo_is_left_alone(self):
+    def test_an_arbitrary_existing_title_is_not_rewritten(self):
         p = self.plan([V(0, "hevc"),
-                       A(1, "aac", 2, "eng", title="AAC stereo 2.0", default=1)])
-        self.assertIsNone(self.kinds(p, "audio")[0].title)
+                       A(1, "aac", 2, "eng", title="Original mix", default=1)])
         self.assertNotIn("name the stereo track", p.reasons)
 
-    def test_an_adopted_second_stereo_track_is_named_too(self):
+    def test_an_adopted_second_stereo_track_is_not_named(self):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
                        A(2, "aac", 2, "eng")])
         stereo = next(s for s in self.kinds(p, "audio") if s.note == "stereo")
         self.assertEqual(stereo.src_index, 2)
-        self.assertEqual(stereo.title, "Stereo")
+        self.assertNotIn("name the stereo track", p.reasons)
 
     def test_wrong_disposition_triggers_a_fix(self):
         p = self.plan([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1),
@@ -358,7 +352,6 @@ class TestStereoConversion(Base):
         self.assertEqual(audio[0].src_index, 1)
         self.assertEqual(audio[0].extra, ["-b:{i}", "192k"])
         self.assertEqual(audio[0].disposition, "default")
-        self.assertEqual(audio[0].title, "Stereo")
         self.assertIn("re-encode ac3 stereo to aac 192k", p.reasons)
 
     def test_it_is_preferred_over_folding_the_surround_mix_down(self):
@@ -387,7 +380,6 @@ class TestStereoConversion(Base):
         french = next(s for s in self.kinds(p, "audio") if s.src_index == 2)
         self.assertEqual(french.codec, ENCODER)
         self.assertEqual(french.disposition, "0")
-        self.assertIsNone(french.title)
 
 
 class TestStereoBitrateLadder(Base):
@@ -537,13 +529,12 @@ class TestDownmixMethod(Base):
         self.assertIn("-filter:{i}", s.extra)
         self.assertIn("aresample=rematrix_maxval=1.0", s.extra)
 
-    def test_the_downmix_is_constant_bitrate_and_tagged(self):
+    def test_the_downmix_is_constant_bitrate_and_language_tagged(self):
         s = self.stereo([V(0, "hevc"), A(1, "eac3", 6, "eng", default=1)])
         self.assertIn("-b:{i}", s.extra)
         self.assertNotIn("-q:{i}", s.extra)
         self.assertEqual(s.extra[s.extra.index("-b:{i}") + 1], "192k")
         self.assertEqual(s.language, "eng")
-        self.assertEqual(s.title, "Stereo")
         self.assertEqual(s.disposition, "default")
         self.assertIn("-ac:{i}", s.extra)
 
@@ -717,10 +708,13 @@ class TestIdempotency(Base):
             self.assertFalse(p.needs_work, f"unexpected work: {p.reasons}")
 
     def test_a_reencoded_stereo_track_is_not_reencoded_again(self):
-        before = self.plan([V(0, "hevc"), A(1, "ac3", 2, "eng", default=1)])
+        before = self.plan([V(0, "hevc"),
+                            A(1, "ac3", 2, "eng", title="Original mix",
+                              default=1, bitrate=448_000)])
         self.assertTrue(before.needs_work)
         after = self.plan([V(0, "hevc"),
-                           A(1, "aac", 2, "eng", title="Stereo", default=1)])
+                           A(1, "aac", 2, "eng", title="Original mix",
+                             default=1)])
         self.assertFalse(after.needs_work, f"unexpected work: {after.reasons}")
 
     def test_a_file_flagged_for_review_is_never_re_queued(self):
@@ -817,7 +811,7 @@ class TestArgs(Base):
         self.assertIn(f"-c:1 {encoder_for(ENCODER)}", joined)
         self.assertIn("-ac:1 2", joined)
         self.assertIn("-b:1 192k", joined)
-        self.assertIn("title=Stereo", joined)
+        self.assertNotIn("title=", joined)
         self.assertIn("language=eng", joined)
 
     def test_a_decoder_option_lands_before_the_input(self):

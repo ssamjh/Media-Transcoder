@@ -149,8 +149,7 @@ function planHtml(plan) {
         <td>${s.action === "encode"
           ? `<span class="ok">${esc(s.codec)}</span>` : esc(s.codec)}</td>
         <td class="num">0:${s.src_index}</td>
-        <td>${esc([s.note, s.title ? `title "${s.title}"` : "",
-          s.disposition === "default" ? "default" : ""]
+        <td>${esc([s.note, s.disposition === "default" ? "default" : ""]
           .filter(Boolean).join(", "))}</td>
       </tr>`).join("") + "</tbody></table></div>";
   }

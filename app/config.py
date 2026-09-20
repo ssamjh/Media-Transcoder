@@ -70,7 +70,6 @@ class AudioCfg:
     stereo_bitrate_low: str = "96k"
     mid_max_source_bitrate: str = "160k"
     low_max_source_bitrate: str = "112k"
-    stereo_title: str = "Stereo"
     commentary_pattern: str = (
         r"commentary|comment|director|cast|crew|isolated|descriptive"
         r"|audio description|narration|sign language"
@@ -493,7 +492,6 @@ MODE_META: dict[str, dict[str, Any]] = {
     "audio.low_max_source_bitrate": {
         "desc": "Source bitrate at or below which an existing 2.0 track is "
                 "re-encoded at stereo_bitrate_low. \"0\" turns the band off."},
-    "audio.stereo_title": {"desc": "Title tag written on the stereo track."},
     "audio.commentary_pattern": {
         "desc": "Regex matched against track titles to detect commentary and "
                 "described audio, which is never folded down to stereo and is "
@@ -1216,6 +1214,9 @@ def _migrate_settings(raw: dict[str, Any]) -> dict[str, Any]:
             audio.pop("keep_best_only", None)
         audio.pop("channel_score", None)
         audio.pop("codec_score", None)
+        # Stereo titles are no longer rewritten. Discard the retired setting
+        # so existing generated config files continue to load on upgrade.
+        audio.pop("stereo_title", None)
 
         # A fold-down and a straight 2.0 transcode used to get their own
         # bitrates. One setting covers both now, so the pair has to collapse

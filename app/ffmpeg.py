@@ -118,8 +118,6 @@ def build_args(plan: FilePlan, dest: str | Path) -> list[str]:
         args += [a.replace("{i}", str(out_index)) for a in sp.extra]
         if sp.disposition is not None:
             args += [f"-disposition:{out_index}", sp.disposition]
-        if sp.title is not None:
-            args += [f"-metadata:s:{out_index}", f"title={sp.title}"]
         if sp.language is not None:
             args += [f"-metadata:s:{out_index}", f"language={sp.language}"]
 

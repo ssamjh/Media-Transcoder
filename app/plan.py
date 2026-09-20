@@ -39,7 +39,6 @@ class StreamPlan:
     # configure the input side. "{s}" is substituted with the source index.
     input_extra: list[str] = field(default_factory=list)
     disposition: str | None = None  # "default" | "0" | None (leave alone)
-    title: str | None = None
     language: str | None = None
     note: str = ""
 
@@ -142,7 +141,6 @@ class FilePlan:
                     "codec": s.codec,
                     "action": "encode" if s.is_encode else "copy",
                     "disposition": s.disposition,
-                    "title": s.title,
                     "language": s.language,
                     "note": s.note,
                 }
@@ -341,19 +339,6 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
             plan.reasons.append("fix audio disposition")
         return "default" if default else "0"
 
-    def stereo_name(s: dict[str, Any]) -> str | None:
-        """Name an adopted stereo track, so it is obvious in a player.
-
-        A downmix this tool encodes is titled on the way out; one it merely
-        adopts keeps whatever name it arrived with, which is often none at
-        all. Returns None when the title already says it - retitling a file
-        that already says "Stereo" would make every scan find work forever.
-        """
-        if a.stereo_title.lower() in title_of(s).lower():
-            return None
-        plan.reasons.append("name the stereo track")
-        return a.stereo_title
-
     def convert_bitrate(s: dict[str, Any]) -> str | None:
         """What to spend re-encoding an existing 2.0 track to AAC.
 
@@ -413,7 +398,7 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
         plan.streams.append(StreamPlan(
             downmix["index"], "audio", a.stereo_encoder,
             extra=extra, input_extra=input_extra, disposition="default",
-            title=a.stereo_title, language=lang_of(downmix),
+            language=lang_of(downmix),
             note=f"stereo downmix from {channels_of(downmix)}ch",
         ))
         plan.reasons.append(
@@ -433,7 +418,6 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
                     s["index"], "audio", a.stereo_encoder,
                     extra=["-b:{i}", bitrate],
                     disposition=want(s, default),
-                    title=a.stereo_title if default else None,
                     language=lang_of(s),
                     note=f"{codec_of(s)} stereo re-encoded",
                 ))
@@ -444,7 +428,6 @@ def _plan_audio(probe: Probe, lib: Profile, plan: FilePlan) -> None:
         plan.streams.append(StreamPlan(
             s["index"], "audio", "copy",
             disposition=want(s, default) if a.add_stereo_downmix else None,
-            title=stereo_name(s) if default else None,
             note=(f"{codec_of(s)} stereo kept; AAC would not be smaller"
                   if is_stereo(s) and not is_target_codec(s)
                   else "stereo" if default else "kept"),

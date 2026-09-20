@@ -115,7 +115,6 @@ def _print_plan(plan: FilePlan) -> None:
         for i, s in enumerate(plan.streams):
             extra = ", ".join(filter(None, [
                 s.note,
-                f'title "{s.title}"' if s.title else "",
                 "default" if s.disposition == "default" else "",
             ]))
             print(f"      {i}: {s.kind:<9} {s.codec:<8} from 0:{s.src_index}"

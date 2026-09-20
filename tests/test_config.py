@@ -94,15 +94,12 @@ class TestRoundTrip(unittest.TestCase):
         mode = mode_of(c)
         cfgmod.apply_mode_updates(c, mode, {
             "audio.commentary_pattern": r'commentary|"quoted"|back\slash',
-            "audio.stereo_title": 'He said "hi"',
         })
         cfgmod.apply_library_updates(c, c.libraries[0],
                                      {"name": "Films & \"Shorts\""})
         back = cfgmod.loads(cfgmod.dump_toml(c))
         self.assertEqual(mode_of(back).audio.commentary_pattern,
                          mode.audio.commentary_pattern)
-        self.assertEqual(mode_of(back).audio.stereo_title,
-                         mode.audio.stereo_title)
         self.assertEqual(back.libraries[0].name, c.libraries[0].name)
 
     def test_list_fields_survive(self):
@@ -288,6 +285,10 @@ stereo_convert_bitrate = "192k"
         self.assertEqual(
             self.load_audio('stereo_convert_bitrate = "256k"').stereo_bitrate,
             "256k")
+
+    def test_the_retired_stereo_title_is_ignored(self):
+        audio = self.load_audio('stereo_title = "Stereo"')
+        self.assertFalse(hasattr(audio, "stereo_title"))
 
 
 class TestValidation(unittest.TestCase):
