@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -179,6 +180,85 @@ class EngineBackupTest(unittest.TestCase):
         self.assertTrue(backup.due(directory, self.cfg.backup.interval_hours))
         self.engine.backup_now()
         self.assertFalse(backup.due(directory, self.cfg.backup.interval_hours))
+
+    def test_restore_swaps_the_database_under_the_running_daemon(self):
+        """The panel restores without the daemon being stopped first."""
+        self.db.upsert("/media/a.mkv", size=10, mtime=1.0, status="done",
+                       library="media")
+        path = self.engine.backup_now()
+        self.db.upsert("/media/later.mkv", size=30, mtime=1.0,
+                       status="pending", library="media")
+
+        kept = self.engine.restore_backup(path.name)
+
+        self.assertIsNotNone(kept)
+        self.assertIsNotNone(self.db.get("/media/a.mkv"))
+        self.assertIsNone(self.db.get("/media/later.mkv"))
+        # The same Db object keeps working: everything else holds a
+        # reference to it, so the connection is swapped inside it.
+        self.db.upsert("/media/after.mkv", size=1, mtime=1.0,
+                       status="pending", library="media")
+        self.assertIsNotNone(self.db.get("/media/after.mkv"))
+
+    def test_other_threads_never_meet_the_closed_connection(self):
+        """The workflow thread reads the database on its own timer.
+
+        If a restore closed the connection out from under it, its very
+        first statement would raise and take that thread down for the rest
+        of the process's life - so the swap holds the same lock.
+        """
+        path = self.engine.backup_now()
+        errors, stop = [], threading.Event()
+
+        def hammer():
+            while not stop.is_set():
+                try:
+                    self.db.list_outbox(limit=1)
+                except Exception as exc:       # noqa: BLE001 - that is the point
+                    errors.append(exc)
+
+        reader = threading.Thread(target=hammer, daemon=True)
+        reader.start()
+        try:
+            for _ in range(5):
+                self.engine.restore_backup(path.name)
+        finally:
+            stop.set()
+            reader.join(timeout=5)
+        self.assertEqual(errors, [])
+
+    def test_restore_refuses_while_work_is_queued(self):
+        path = self.engine.backup_now()
+        with self.engine._lock:
+            self.engine._queued.add("/media/busy.mkv")
+        try:
+            with self.assertRaises(RuntimeError):
+                self.engine.restore_backup(path.name)
+        finally:
+            with self.engine._lock:
+                self.engine._queued.discard("/media/busy.mkv")
+
+    def test_restore_only_accepts_a_snapshot_from_the_backup_directory(self):
+        elsewhere = Path(self.tmp.name) / "elsewhere.db"
+        elsewhere.write_bytes(b"not a database")
+        for name in (str(elsewhere), "../elsewhere.db", "state-1999-01-01.db"):
+            with self.assertRaises(ValueError):
+                self.engine.restore_backup(name)
+        # and the daemon still has a working database afterwards
+        self.assertIsNotNone(self.db.stats())
+
+    def test_a_damaged_snapshot_leaves_the_daemon_with_a_live_database(self):
+        directory = backup.backup_dir(self.cfg)
+        directory.mkdir(parents=True, exist_ok=True)
+        bad = directory / f"{backup.PREFIX}1999-01-01{backup.SUFFIX}"
+        bad.write_bytes(b"not a database at all")
+
+        with self.assertRaises(ValueError):
+            self.engine.restore_backup(bad.name)
+
+        self.db.upsert("/media/still-here.mkv", size=1, mtime=1.0,
+                       status="pending", library="media")
+        self.assertIsNotNone(self.db.get("/media/still-here.mkv"))
 
 
 class BackupConfigTest(unittest.TestCase):

@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import backup
+from . import integrations
 from . import config as config_mod
 from . import notify as notify_mod
 from .config import Config, ConfigError
@@ -195,6 +196,8 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/libraries": self.api_libraries,
                 "/api/modes": self.api_modes,
                 "/api/backups": self.api_backups,
+                "/api/integrations": self.api_integrations,
+                "/api/workflow": self.api_workflow,
             }.get(route)
             if handler is None:
                 raise ApiError("not found", 404)
@@ -247,6 +250,12 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/modes/delete": self.api_mode_delete,
                 "/api/notify/test": self.api_notify_test,
                 "/api/backups/run": self.api_backup_run,
+                "/api/backups/restore": self.api_backup_restore,
+                "/api/integrations/add": self.api_integration_add,
+                "/api/integrations/update": self.api_integration_update,
+                "/api/integrations/delete": self.api_integration_delete,
+                "/api/integrations/autopulse": self.api_autopulse_update,
+                "/api/integrations/test": self.api_integration_test,
             }.get(route)
             if handler is None:
                 raise ApiError("not found", 404)
@@ -416,6 +425,93 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.Error) as exc:
             raise ApiError(f"backup failed: {exc}", 500)
         return {"ok": True, "path": str(path), **self.api_backups()}
+
+    def api_backup_restore(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Put a snapshot back, under the running daemon.
+
+        Only the snapshot's name is accepted, never a path: this replaces
+        the state database, and the set of files it may read from is the
+        backup directory and nothing else.
+        """
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise ApiError("name is required")
+        try:
+            kept = self.engine.restore_backup(name)
+        except ValueError as exc:
+            raise ApiError(str(exc), 404) from None
+        except RuntimeError as exc:
+            # Work in flight: a refusal the operator can act on, not a fault.
+            raise ApiError(str(exc), 409) from None
+        except (OSError, sqlite3.Error) as exc:
+            raise ApiError(f"restore failed: {exc}", 500) from None
+        message = f"restored {name}"
+        if kept:
+            message += f"; previous database kept as {Path(kept).name}"
+        log.warning("%s", message)
+        return {"ok": True, "message": message, **self.api_backups()}
+
+    # --- imports ----------------------------------------------------------
+
+    def api_workflow(self) -> dict[str, Any]:
+        """The durable import queue: one entry per accepted Arr import.
+
+        Jobs carry the encode; the outbox rows carry what happens after it
+        (the Arr rescan/rename, then AutoPulse). Both are shown against the
+        job, because a stuck import is almost always stuck in one stage and
+        the panel's job is to say which.
+        """
+        q = self._query()
+        limit = self._int(q, "limit", 50, 1, 500)
+        status = (q.get("status") or "").strip() or None
+        db = self.engine.db
+
+        actions: dict[int, list[dict[str, Any]]] = {}
+        for row in db.list_outbox(limit=2000):
+            job_id = row["job_id"]
+            if job_id is None:
+                continue
+            actions.setdefault(int(job_id), []).append({
+                "id": row["id"], "action": row["action"],
+                "status": row["status"], "retries": row["retries"],
+                "next_attempt": row["next_attempt"], "error": row["error"],
+                "updated_at": row["updated_at"],
+            })
+
+        jobs = []
+        for row in db.list_jobs(status, limit=limit):
+            meta = json_loads(row["source_metadata"], {}) or {}
+            path = row["final_path"] or row["source_path"]
+            jobs.append({
+                "id": row["id"],
+                "path": path,
+                "name": Path(path).name,
+                "source_path": row["source_path"],
+                "final_path": row["final_path"],
+                "provider": row["source_provider"] or "",
+                "integration": str(meta.get("integration") or ""),
+                "event": str(meta.get("event_type") or ""),
+                "mode": row["mode"] or "",
+                "stage": row["stage"],
+                "status": row["status"],
+                "retries": row["retries"],
+                "next_attempt": row["next_attempt"],
+                "error": row["error"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "finished_at": row["finished_at"],
+                "actions": actions.get(int(row["id"]), []),
+            })
+        # Newest first: an import someone is asking about is a recent one.
+        jobs.sort(key=lambda j: (j["created_at"] or 0, j["id"]), reverse=True)
+        stats = db.workflow_stats()
+        return {
+            "jobs": jobs,
+            "stats": stats,
+            "failed": int(stats["jobs"].get("failed", 0)),
+            "now": time.time(),
+            "autopulse": self.engine.cfg.integrations.autopulse.enabled,
+        }
 
     def api_files(self) -> dict[str, Any]:
         q = self._query()
@@ -839,6 +935,159 @@ class Handler(BaseHTTPRequestHandler):
                  lib.name, removed)
         return {"ok": True, "message": f"removed {lib.name}",
                 **self.api_libraries()}
+
+    # --- integrations -----------------------------------------------------
+
+    def _origin(self) -> str:
+        """Where this panel is being reached from.
+
+        Used to print the webhook URL to paste into Sonarr. Built from the
+        request's own headers so it is right whether the panel is reached by
+        container name, by IP, or through a reverse proxy.
+        """
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host")
+        if not host:
+            addr = self.server.server_address
+            host = f"{addr[0]}:{addr[1]}"
+        scheme = self.headers.get("X-Forwarded-Proto") or "http"
+        return f"{scheme}://{host}"
+
+    def _arr_profile(self, body: dict[str, Any]) -> tuple[str, Any]:
+        provider = str(body.get("provider") or "").strip().lower()
+        if provider not in ("sonarr", "radarr"):
+            raise ApiError("provider must be sonarr or radarr")
+        wanted = str(body.get("id") or "")
+        instance = config_mod.arr_instance(self.engine.cfg, provider, wanted)
+        if instance is None:
+            raise ApiError(f"no such {provider} integration: {wanted}", 404)
+        return provider, instance
+
+    def _integration_card(self, provider: str, instance: Any) -> dict[str, Any]:
+        cfg = self.engine.cfg
+        mode = cfg.mode(instance.mode) if instance.mode else None
+        return {
+            "provider": provider,
+            "id": instance.id,
+            "name": instance.name,
+            "enabled": instance.enabled,
+            "mode": instance.mode,
+            "mode_name": mode.name if mode else "",
+            "url": instance.url,
+            "webhook": f"{self._origin()}/api/webhook/{provider}/{instance.id}",
+            # Enough to reconcile with the Arr, or only enough to receive?
+            "outbound_ready": bool(instance.url and instance.api_key),
+            "api_key_configured": bool(instance.api_key),
+            "secret_configured": bool(instance.secret),
+            "schema": config_mod.arr_schema(instance, cfg),
+        }
+
+    def api_integrations(self) -> dict[str, Any]:
+        cfg = self.engine.cfg
+        auto = cfg.integrations.autopulse
+        return {
+            "sonarr": [self._integration_card("sonarr", i)
+                       for i in cfg.integrations.sonarr],
+            "radarr": [self._integration_card("radarr", i)
+                       for i in cfg.integrations.radarr],
+            "autopulse": {
+                "enabled": auto.enabled,
+                "url": auto.url,
+                "configured": bool(auto.url),
+                "schema": config_mod.autopulse_schema(cfg),
+            },
+            "modes": [{"id": m.id, "name": m.name} for m in cfg.modes],
+            "api_key": cfg.web.api_key,
+            "origin": self._origin(),
+        }
+
+    def api_integration_add(self, body: dict[str, Any]) -> dict[str, Any]:
+        provider = str(body.get("provider") or "").strip().lower()
+        try:
+            instance = config_mod.add_arr_instance(
+                self.engine.cfg, provider, str(body.get("name") or ""))
+        except ConfigError as exc:
+            raise ApiError(str(exc)) from None
+        self._persist()
+        log.info("%s integration added: %s (%s)", provider, instance.name,
+                 instance.id)
+        return {"ok": True, "id": instance.id, **self.api_integrations()}
+
+    def api_integration_update(self, body: dict[str, Any]) -> dict[str, Any]:
+        provider, instance = self._arr_profile(body)
+        updates = body.get("updates")
+        if not isinstance(updates, dict):
+            raise ApiError("updates must be an object of dotted keys")
+        try:
+            changed = config_mod.apply_arr_updates(
+                self.engine.cfg, instance, updates)
+        except ConfigError as exc:
+            raise ApiError(str(exc)) from None
+        self._persist()
+        if changed:
+            log.info("%s integration %s updated: %s", provider, instance.id,
+                     ", ".join(changed))
+        return {"ok": True, "changed": changed, **self.api_integrations()}
+
+    def api_integration_delete(self, body: dict[str, Any]) -> dict[str, Any]:
+        provider, instance = self._arr_profile(body)
+        try:
+            config_mod.remove_arr_instance(self.engine.cfg, provider,
+                                           instance.id)
+        except ConfigError as exc:
+            raise ApiError(str(exc)) from None
+        self._persist()
+        log.info("%s integration removed: %s", provider, instance.name)
+        return {"ok": True, "message": f"removed {instance.name}",
+                **self.api_integrations()}
+
+    def api_autopulse_update(self, body: dict[str, Any]) -> dict[str, Any]:
+        updates = body.get("updates")
+        if not isinstance(updates, dict):
+            raise ApiError("updates must be an object of dotted keys")
+        try:
+            changed = config_mod.apply_autopulse_updates(
+                self.engine.cfg, updates)
+        except ConfigError as exc:
+            raise ApiError(str(exc)) from None
+        self._persist()
+        if changed:
+            log.info("autopulse updated: %s", ", ".join(changed))
+        return {"ok": True, "changed": changed, **self.api_integrations()}
+
+    def api_integration_test(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Prove a profile's outbound credentials work, changing nothing.
+
+        Sonarr and Radarr answer system/status, which is the cheapest call
+        that still proves the URL, the port and the key. AutoPulse has no
+        read-only endpoint and its only verb triggers a real scan, so it is
+        checked as far as being configured and no further.
+        """
+        provider = str(body.get("provider") or "").strip().lower()
+        if provider == "autopulse":
+            auto = self.engine.cfg.integrations.autopulse
+            if not auto.url.strip():
+                raise ApiError("AutoPulse has no url configured")
+            target = auto.url.rstrip("/") + "/" + auto.trigger_endpoint.lstrip("/")
+            return {"ok": True, "provider": "autopulse",
+                    "message": f"AutoPulse will be called at {target}"}
+
+        provider, instance = self._arr_profile(body)
+        if not instance.url or not instance.api_key:
+            raise ApiError(f"{instance.name} needs a url and an api_key "
+                           "before it can be tested")
+        cls = (integrations.SonarrClient if provider == "sonarr"
+               else integrations.RadarrClient)
+        client = cls(instance.url, instance.api_key,
+                     timeout=instance.request_timeout)
+        try:
+            status = client.system_status()
+        except (integrations.IntegrationError, OSError) as exc:
+            raise ApiError(f"{instance.name}: {exc}", 502) from None
+        version = str(status.get("version") or "") if isinstance(status, dict) else ""
+        return {"ok": True, "provider": provider, "id": instance.id,
+                "version": version,
+                "message": f"{instance.name} answered"
+                           + (f", version {version}" if version else "")}
 
     # --- modes ------------------------------------------------------------
 

@@ -204,29 +204,38 @@ _DURABLE_COLUMNS: dict[str, dict[str, str]] = {
 class Db:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
+        self._lock = threading.Lock()
+        with self._lock:
+            self._connect()
+
+    def _connect(self) -> None:
+        """Connect and bring the file up to date. Call with the lock held.
+
+        Separate from __init__ because restoring a backup replaces the file
+        under a live process: every other object holds this Db, so the
+        connection is swapped inside it rather than the Db being rebuilt.
+        """
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.executescript(SCHEMA)
-            self._migrate_durable_schema()
-            # Nothing can still be running after a restart.
-            self._conn.execute(
-                "UPDATE files SET status = 'pending' "
-                "WHERE status IN ('running', 'queued')"
-            )
-            self._conn.execute(
-                "UPDATE history SET status = 'cancelled', finished = ?, "
-                "error = 'interrupted by restart' WHERE finished IS NULL",
-                (time.time(),),
-            )
-            self._repair_history_paths()
-            self._recover_durable_state()
-            self._conn.commit()
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.executescript(SCHEMA)
+        self._migrate_durable_schema()
+        # Nothing can still be running after a restart.
+        self._conn.execute(
+            "UPDATE files SET status = 'pending' "
+            "WHERE status IN ('running', 'queued')"
+        )
+        self._conn.execute(
+            "UPDATE history SET status = 'cancelled', finished = ?, "
+            "error = 'interrupted by restart' WHERE finished IS NULL",
+            (time.time(),),
+        )
+        self._repair_history_paths()
+        self._recover_durable_state()
+        self._conn.commit()
 
     def _migrate_durable_schema(self) -> None:
         """Add durable-work columns without disturbing an existing DB.
@@ -327,6 +336,23 @@ class Db:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def swap(self, replace: Callable[[], Any]) -> Any:
+        """Close, let `replace` put a different file at `path`, open again.
+
+        The whole swap happens under the lock every other statement takes,
+        so a worker or the workflow thread waits for the new connection
+        instead of meeting the closed one - which would otherwise kill that
+        thread for the rest of the process's life. Opening again performs
+        the same 'running' row reset a restart does, applied to whatever
+        the restored file was holding.
+        """
+        with self._lock:
+            self._conn.close()
+            try:
+                return replace()
+            finally:
+                self._connect()
 
     def backup_to(self, dest: str | Path) -> None:
         """Write a consistent snapshot of this database to `dest`.

@@ -10,11 +10,9 @@ python -m unittest tests.test_plan -v           # one module
 python -m unittest tests.test_plan.TestIdempotency.test_output_of_a_full_run_needs_no_further_work
 python -m unittest tests.test_modes.TestIdempotency
 
-python -m app -c ./config/config.toml scan      # run the CLI against a local config
-python -m app -c ./config/config.toml daemon    # scheduler + workers + web panel on :8080
+python -m app -c ./config/config.toml           # the daemon: scheduler + workers + panel
 
 docker compose up -d --build                    # the real deployment
-docker compose run --rm transcoder <subcommand> # one-shot CLI in the container
 ```
 
 Tests need no media files and no ffmpeg for `test_plan` / `test_config` (planning is pure
@@ -23,6 +21,12 @@ port but never starts worker threads, so it touches nothing.
 
 ## Hard constraints
 
+- **There is no CLI, and there must not be one again.** `app/cli.py` is a process
+  entry point and nothing else: load the config, mint the API key, preflight the
+  writable directories, start the engine and the panel. Every operation - scanning,
+  checking or processing one path, editing libraries/modes/integrations, backups and
+  restores - is a panel button backed by an endpoint in `web.py`. A new capability
+  goes there, not behind an argparse subcommand, or the two surfaces drift.
 - **Zero third-party dependencies, and it must stay that way.** Config is stdlib `tomllib`
   in, hand-rolled emitter out; the panel is stdlib `http.server`; there is no requirements
   file, no venv, nothing to `pip install`. Adding a dependency breaks the premise of the
@@ -63,7 +67,7 @@ port but never starts worker threads, so it touches nothing.
 ## Architecture
 
 Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `engine`, persisted by
-`db`, driven by either `cli` or `web`.
+`db`, driven by `web` - `cli` only starts the thing.
 
 - `probe.py`: thin ffprobe wrapper plus stream accessors (`lang_of`, `codec_of`, …). The
   `Probe` dataclass is just `path + streams + fmt`, which is why tests can fabricate one.
@@ -119,7 +123,13 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
   for hours and the backup must not queue behind it. Snapshots are switched to a
   rollback journal so each is one self-contained file, and `restore` verifies a
   snapshot opens before moving the live database aside - the file being replaced
-  may be the only other copy.
+  may be the only other copy. `Engine.restore_backup` is the panel's path into
+  it: only a *name* inside the backup directory is accepted (this replaces the
+  state database; the set of files it may read is not open), it refuses while
+  anything is queued or scanning, and it swaps the connection inside the live
+  `Db` (`Db.reopen`) rather than rebuilding it, because engine, workflow and
+  every handler hold that one object. `Engine.rehydrate` then pushes back the
+  durable imports the restored snapshot still owes, exactly as `start()` does.
 - `db.py`: SQLite at `config/state.db`. `files` keyed by path, carrying `(size, mtime)` so
   an unchanged file that settled as `done`/`skip` is never re-probed; `history` records runs.
   Statuses: `pending|queued|running|skip|done|failed`.
@@ -130,10 +140,16 @@ Pipeline: `probe → plan → ffmpeg → verify → replace`, orchestrated by `e
   the file on disk is already correct, so no encode state may depend on a third party.
   `notify.depth` counts in-flight retries as well as queued calls, or `join()` would
   report an empty backlog while a call was mid-backoff.
+- `integrations.py`/`workflow.py`: the outbound Arr and AutoPulse clients, and the
+  durable import outbox that drives them. `ArrClient.system_status` exists only
+  for the panel's Test button: the cheapest authenticated call that still proves
+  the URL, the port and the key.
 - `web.py` + `static/`: dispatch-dict routing to `api_*` methods, dependency-free SPA. No
-  authentication anywhere, by design; the panel is trusted-network only.
-- `cli.py`: argparse subcommands sharing the same `Engine`. `scan`/`check`/`libraries`
-  support `--json`.
+  authentication anywhere, by design; the panel is trusted-network only. It is the whole
+  control surface: `/api/workflow` lists the durable import queue that the Imports section
+  of the Integrations tab renders, and `/api/backups/restore` is the restore the CLI used
+  to own.
+- `cli.py`: the entry point. Flags only (`-c`, `--db`, `--log-level`), no subcommands.
 
 ### Libraries and modes
 
@@ -190,6 +206,31 @@ Config files from before this split still load: `_from_dict` lifts a library's o
 `[libraries.video]`-style settings into a mode (sharing one mode between libraries
 configured identically), and turns an old override-style mode into a full one by applying
 its `overrides` to the defaults.
+
+### Editing integrations
+
+Arr profiles are a **list** of dataclasses, so they cannot be addressed by the
+dotted-key machinery that edits everything else (`_describe` skips lists of
+dataclasses, and `integrations.sonarr.0.url` is not a setting). They therefore
+get the same treatment libraries and modes get: their own META table
+(`ARR_META`, `AUTOPULSE_META`), their own schema builders (`arr_schema`,
+`autopulse_schema`), and add/update/delete endpoints under `/api/integrations`.
+`apply_arr_updates` is transactional for the reason `apply_mode_updates` is:
+`path_from`/`path_to` are only valid as a pair, and a half-applied profile would
+be live for the next webhook that arrives.
+
+`ARR_META`/`AUTOPULSE_META` mark credentials with `secret: True`, which the
+panel renders as a masked input with a Show box. That is legibility, not
+secrecy: `config.toml` holds them in plain text and `/api/config` already
+returns the rendered file, so nothing here is a boundary.
+
+The POST routes are `/api/integrations/<verb>`, deliberately not
+`/api/integrations/<provider>`: `Handler._native_route` claims the latter as a
+webhook alias, and a profile named `add` must never be able to shadow a verb.
+
+`integrations.autopulse.api_key` is read by nothing (`workflow._send_autopulse`
+passes only username/password), so it is marked `readonly` rather than offered
+as a setting that does nothing.
 
 ### API key
 

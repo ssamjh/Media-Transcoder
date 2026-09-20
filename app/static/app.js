@@ -86,7 +86,8 @@ const sel = (scope, key) => `[data-key="${CSS.escape(scope + key)}"]`;
 
 /* ---------- tabs ---------- */
 
-const TABS = ["dashboard", "libraries", "modes", "files", "history", "settings"];
+const TABS = ["dashboard", "libraries", "modes", "integrations",
+  "files", "history", "settings"];
 let current = "dashboard";
 
 function show(tab) {
@@ -98,9 +99,10 @@ function show(tab) {
   if (location.hash.slice(1) !== tab) location.hash = tab;
   if (tab === "libraries") { loadLibraries(); loadModes(); }
   if (tab === "modes") loadModes();
+  if (tab === "integrations") { loadIntegrations(); loadWorkflow(); }
   if (tab === "files") loadFiles();
   if (tab === "history") loadHistory();
-  if (tab === "settings") loadSettings();
+  if (tab === "settings") { loadSettings(); loadBackups(); }
 }
 
 document.querySelectorAll("#tabs button").forEach((b) =>
@@ -264,7 +266,22 @@ function readControl(node, type) {
 
 function control(f, scope) {
   const key = esc(scope + f.key);
-  if (f.readonly) return `<input type="text" value="${esc(f.value)}" disabled>`;
+  // Readonly wins over everything, but a readonly credential is still a
+  // credential: masked, and with nothing to reveal it with, because there
+  // is nothing to type into it either.
+  if (f.readonly) {
+    return `<input type="${f.secret ? "password" : "text"}"
+      value="${esc(f.value)}" disabled>`;
+  }
+  // A credential: masked so it is not readable over a shoulder or in a
+  // screenshot. config.toml still holds it in plain text, and the panel can
+  // read it back, so this is legibility rather than secrecy.
+  if (f.secret) {
+    return `<input type="password" data-key="${key}" value="${esc(f.value)}"
+      autocomplete="new-password" spellcheck="false">
+      <label class="hint reveal"><input type="checkbox" data-reveal="${key}">
+        Show</label>`;
+  }
   if (f.type === "bool") {
     return `<input type="checkbox" data-key="${key}" ${f.value ? "checked" : ""}>`;
   }
@@ -623,6 +640,9 @@ async function tick() {
   const off = d.libraries.filter((l) => !l.enabled).length;
   if (off) warn.push(`${off} library disabled`);
   if (d.counts?.failed) warn.push(`${d.counts.failed} failed`);
+  const wfFailed = d.workflow?.jobs?.failed || 0;
+  if (wfFailed) warn.push(`${wfFailed} failed import${wfFailed > 1 ? "s" : ""}`);
+  if (d.backup?.enabled === false) warn.push("backups off");
   if (warn.length) note += `  •  ${warn.join(", ")}`;
   el("sched-note").textContent = note;
 
@@ -740,6 +760,38 @@ function wireRows(root) {
     tr.addEventListener("click", () => openFile(tr.dataset.path)));
 }
 
+// One arbitrary path, planned or processed on demand. The file does not
+// have to be tracked yet, so this reaches anything inside a library without
+// waiting for a scan to notice it.
+function openPathPrompt() {
+  openDrawer("Check a file", `<div class="newlib">
+    <div><label for="p-path">Path</label>
+      <input id="p-path" type="text" placeholder="/media/TV/Show/S01E01.mkv">
+      <span class="hint">As this container sees it, inside one of the
+        libraries.</span></div>
+    <div><label for="p-mode">Mode</label>
+      <select id="p-mode">
+        <option value="">Library profile</option>
+        ${modes.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("")}
+      </select>
+      <span class="hint">Applies to this run only.</span></div>
+    <div class="toolbar" style="padding:0;margin:0">
+      <button class="primary" id="p-check">Check</button>
+      <button id="p-process">Process now</button>
+    </div>
+  </div>`);
+
+  const run = async (endpoint) => {
+    const path = el("p-path").value.trim();
+    if (!path) { toast("A path is required", true); return; }
+    const d = await act(endpoint, { path, mode: el("p-mode").value || "" });
+    if (d) openFile(path);
+  };
+  el("p-check").addEventListener("click", () => run("/api/check"));
+  el("p-process").addEventListener("click", () => run("/api/process"));
+}
+
+el("btn-path").addEventListener("click", openPathPrompt);
 el("btn-scan").addEventListener("click", () => act("/api/scan"));
 el("btn-queue").addEventListener("click", () => act("/api/queue-pending"));
 el("btn-cancel-all").addEventListener("click", () => act("/api/cancel-all"));
@@ -1096,6 +1148,436 @@ function renderIntegration() {
     </div>`;
 }
 
+/* ---------- integrations ---------- */
+
+// One card per Sonarr/Radarr profile, plus the single AutoPulse destination.
+// The card is deliberately the same shape as a library card: head, status
+// row, and the generated schema behind Configure.
+let integrations = { sonarr: [], radarr: [], autopulse: {}, modes: [] };
+const intOpen = new Set();          // "provider:id" of the expanded cards
+let autoOpen = false;
+
+function intKey(p, id) { return p + ":" + id; }
+
+function webhookRow(c) {
+  return `<div class="lib-paths">
+    ${esc(c.webhook)}
+    <button class="small" data-int-copy="${esc(c.webhook)}">Copy</button>
+  </div>`;
+}
+
+function intCard(c) {
+  const open = intOpen.has(intKey(c.provider, c.id));
+  const scope = intKey(c.provider, c.id) + ":";
+  return `<div class="lib ${c.enabled ? "" : "off"}"
+    data-int="${esc(intKey(c.provider, c.id))}">
+    <div class="lib-head">
+      <label class="toggle" title="Accept webhooks from this instance">
+        <input type="checkbox" data-int-on="${esc(intKey(c.provider, c.id))}"
+          ${c.enabled ? "checked" : ""}>
+      </label>
+      <span class="nm">${esc(c.name)}</span>
+      <span class="tag">${esc(c.provider)}</span>
+      <span class="tag">${esc(c.id)}</span>
+      <div class="grow"></div>
+      <button class="small" data-int-test="${esc(intKey(c.provider, c.id))}">Test</button>
+      <button class="small" data-int-edit="${esc(intKey(c.provider, c.id))}">${
+        open ? "Close" : "Configure"}</button>
+      <button class="small danger" data-int-del="${esc(intKey(c.provider, c.id))}">Delete</button>
+    </div>
+    ${webhookRow(c)}
+    <div class="stage-row">
+      <span class="stage ${c.outbound_ready ? "on" : "off"}">rescan and rename</span>
+      <span class="stage ${c.mode ? "on" : "off"}">${
+        c.mode ? "mode: " + esc(c.mode_name || c.mode) : "library's own mode"}</span>
+      <span class="stage ${c.secret_configured ? "on" : "off"}">own secret</span>
+    </div>
+    ${c.outbound_ready ? "" : `<div class="lib-stats"><span class="tag warn">
+      Add this application's url and api_key to enable the rescan and rename
+      stage</span></div>`}
+    ${open ? `<div class="lib-body">
+      <div class="toolbar" style="padding:13px 16px 0;margin:0">
+        <button class="primary small" data-int-save="${esc(intKey(c.provider, c.id))}"
+          disabled>Save changes</button>
+        <button class="small" data-int-discard="${esc(intKey(c.provider, c.id))}">Discard</button>
+        <span class="muted" data-int-note="${esc(intKey(c.provider, c.id))}"></span>
+      </div>
+      ${sectionsHtml(c.schema, scope)}
+    </div>` : ""}
+  </div>`;
+}
+
+function autopulseCard() {
+  const a = integrations.autopulse || {};
+  return `<div class="lib ${a.enabled ? "" : "off"}" data-autopulse>
+    <div class="lib-head">
+      <label class="toggle" title="Tell AutoPulse about finished imports">
+        <input type="checkbox" data-auto-on ${a.enabled ? "checked" : ""}>
+      </label>
+      <span class="nm">AutoPulse</span>
+      <div class="grow"></div>
+      <button class="small" data-auto-test>Test</button>
+      <button class="small" data-auto-edit>${autoOpen ? "Close" : "Configure"}</button>
+    </div>
+    <div class="lib-paths">${esc(a.url || "no url configured")}</div>
+    <div class="stage-row">
+      <span class="stage ${a.enabled && a.configured ? "on" : "off"}">
+        hand final path to Jellyfin</span>
+    </div>
+    ${autoOpen ? `<div class="lib-body">
+      <div class="toolbar" style="padding:13px 16px 0;margin:0">
+        <button class="primary small" data-auto-save disabled>Save changes</button>
+        <button class="small" data-auto-discard>Discard</button>
+        <span class="muted" data-auto-note></span>
+      </div>
+      ${sectionsHtml(a.schema || [], "autopulse:")}
+    </div>` : ""}
+  </div>`;
+}
+
+function renderIntegrations() {
+  const cards = [...integrations.sonarr, ...integrations.radarr];
+  el("integrations").innerHTML = cards.map(intCard).join("")
+    || `<div class="card"><div class="empty">No Sonarr or Radarr profiles yet.
+      Add one, then paste its webhook URL into that application under
+      Settings &rarr; Connect &rarr; Webhook, with On Import and On Upgrade
+      ticked.</div></div>`;
+  el("autopulse").innerHTML = autopulseCard();
+  wireIntegrations();
+}
+
+function findCard(key) {
+  return [...integrations.sonarr, ...integrations.radarr]
+    .find((c) => intKey(c.provider, c.id) === key);
+}
+
+function refreshIntDirty(c) {
+  const key = intKey(c.provider, c.id);
+  const root = el("integrations").querySelector(`[data-int="${CSS.escape(key)}"]`);
+  if (!root) return new Map();
+  const d = collectDirty(c.schema, key + ":", root);
+  const save = root.querySelector(`[data-int-save="${CSS.escape(key)}"]`);
+  const note = root.querySelector(`[data-int-note="${CSS.escape(key)}"]`);
+  if (save) save.disabled = d.size === 0;
+  if (note) note.textContent = d.size ? `${d.size} unsaved` : "";
+  return d;
+}
+
+function refreshAutoDirty() {
+  const root = el("autopulse");
+  const d = collectDirty(integrations.autopulse.schema || [], "autopulse:", root);
+  const save = root.querySelector("[data-auto-save]");
+  const note = root.querySelector("[data-auto-note]");
+  if (save) save.disabled = d.size === 0;
+  if (note) note.textContent = d.size ? `${d.size} unsaved` : "";
+  return d;
+}
+
+// Masked credentials get a Show box. Wired wherever they are rendered, so
+// the same control works on any future secret field.
+function wireReveals(root) {
+  root.querySelectorAll("[data-reveal]").forEach((box) =>
+    box.addEventListener("change", () => {
+      const field = root.querySelector(`[data-key="${CSS.escape(box.dataset.reveal)}"]`);
+      if (field) field.type = box.checked ? "text" : "password";
+    }));
+}
+
+function wireIntegrations() {
+  const root = el("integrations");
+  const auto = el("autopulse");
+
+  root.querySelectorAll("[data-int-copy]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(b.dataset.intCopy);
+        toast("Webhook URL copied");
+      } catch {
+        toast("Copy failed, select it by hand", true);
+      }
+    }));
+
+  root.querySelectorAll("[data-int-edit]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const k = b.dataset.intEdit;
+      if (intOpen.has(k)) intOpen.delete(k); else intOpen.add(k);
+      renderIntegrations();
+    }));
+
+  root.querySelectorAll("[data-int-on]").forEach((n) =>
+    n.addEventListener("change", async () => {
+      const c = findCard(n.dataset.intOn);
+      const d = await act("/api/integrations/update",
+        { provider: c.provider, id: c.id, updates: { enabled: n.checked } },
+        n.checked ? "Integration enabled" : "Integration disabled");
+      if (d) { integrations = d; renderIntegrations(); } else loadIntegrations();
+    }));
+
+  root.querySelectorAll("[data-int-test]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const c = findCard(b.dataset.intTest);
+      b.disabled = true;
+      await act("/api/integrations/test", { provider: c.provider, id: c.id });
+      b.disabled = false;
+    }));
+
+  root.querySelectorAll("[data-int-del]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const c = findCard(b.dataset.intDel);
+      if (!confirm(`Delete the ${c.provider} profile "${c.name}"? Its webhook `
+        + "URL stops working. No media files or tracked state are touched.")) return;
+      const d = await act("/api/integrations/delete",
+        { provider: c.provider, id: c.id });
+      if (d) { integrations = d; intOpen.delete(b.dataset.intDel); renderIntegrations(); }
+    }));
+
+  [...integrations.sonarr, ...integrations.radarr]
+    .filter((c) => intOpen.has(intKey(c.provider, c.id)))
+    .forEach((c) => {
+      const key = intKey(c.provider, c.id);
+      const card = root.querySelector(`[data-int="${CSS.escape(key)}"]`);
+      if (!card) return;
+      wireReveals(card);
+      card.querySelectorAll(`[data-key^="${CSS.escape(key + ":")}"]`).forEach((n) => {
+        n.addEventListener("input", () => refreshIntDirty(c));
+        n.addEventListener("change", () => refreshIntDirty(c));
+      });
+      card.querySelector(`[data-int-discard="${CSS.escape(key)}"]`)
+        ?.addEventListener("click", () => renderIntegrations());
+      card.querySelector(`[data-int-save="${CSS.escape(key)}"]`)
+        ?.addEventListener("click", async () => {
+          const d = refreshIntDirty(c);
+          if (!d.size) return;
+          const res = await act("/api/integrations/update",
+            { provider: c.provider, id: c.id, updates: Object.fromEntries(d) },
+            `Saved ${d.size} setting${d.size > 1 ? "s" : ""}`);
+          if (res) { integrations = res; renderIntegrations(); }
+        });
+      refreshIntDirty(c);
+    });
+
+  auto.querySelector("[data-auto-edit]")?.addEventListener("click", () => {
+    autoOpen = !autoOpen;
+    renderIntegrations();
+  });
+
+  auto.querySelector("[data-auto-on]")?.addEventListener("change", async (e) => {
+    const d = await act("/api/integrations/autopulse",
+      { updates: { enabled: e.target.checked } },
+      e.target.checked ? "AutoPulse enabled" : "AutoPulse disabled");
+    if (d) { integrations = d; renderIntegrations(); } else loadIntegrations();
+  });
+
+  auto.querySelector("[data-auto-test]")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    await act("/api/integrations/test", { provider: "autopulse" });
+    e.target.disabled = false;
+  });
+
+  if (autoOpen) {
+    wireReveals(auto);
+    auto.querySelectorAll('[data-key^="autopulse:"]').forEach((n) => {
+      n.addEventListener("input", refreshAutoDirty);
+      n.addEventListener("change", refreshAutoDirty);
+    });
+    auto.querySelector("[data-auto-discard]")
+      ?.addEventListener("click", () => renderIntegrations());
+    auto.querySelector("[data-auto-save]")?.addEventListener("click", async () => {
+      const d = refreshAutoDirty();
+      if (!d.size) return;
+      const res = await act("/api/integrations/autopulse",
+        { updates: Object.fromEntries(d) },
+        `Saved ${d.size} setting${d.size > 1 ? "s" : ""}`);
+      if (res) { integrations = res; renderIntegrations(); }
+    });
+    refreshAutoDirty();
+  }
+}
+
+async function loadIntegrations() {
+  try {
+    integrations = await api("/api/integrations");
+    renderIntegrations();
+  } catch (e) {
+    el("integrations").innerHTML =
+      `<div class="card"><div class="empty bad">${esc(e.message)}</div></div>`;
+  }
+}
+
+function addIntegration(provider) {
+  const label = provider === "sonarr" ? "Sonarr" : "Radarr";
+  openDrawer(`Add ${label}`, `<div class="newlib">
+    <div><label for="ni-name">Name</label>
+      <input id="ni-name" type="text" placeholder="${label} 4K">
+      <span class="hint">Set it to the instance name ${label} sends in its
+        payload and the profile is matched even without the id in the URL.</span></div>
+    <div><button class="primary" id="ni-go">Create</button></div>
+    <p class="muted">The profile is created empty. Add the application's url
+      and api_key next, then paste its webhook URL into ${label}.</p>
+  </div>`);
+  el("ni-go").addEventListener("click", async () => {
+    const name = el("ni-name").value.trim();
+    if (!name) { toast("A name is required", true); return; }
+    const d = await act("/api/integrations/add", { provider, name },
+      `Added ${name}`);
+    if (d) {
+      integrations = d;
+      intOpen.add(intKey(provider, d.id));
+      closeDrawer();
+      renderIntegrations();
+    }
+  });
+}
+
+el("i-add-sonarr").addEventListener("click", () => addIntegration("sonarr"));
+el("i-add-radarr").addEventListener("click", () => addIntegration("radarr"));
+
+/* ---------- imports ---------- */
+
+// The durable import queue. A job is one accepted Sonarr/Radarr import: it
+// carries the encode, and the outbox actions hanging off it carry what
+// happens afterwards (the Arr rescan and rename, then AutoPulse). A stuck
+// import is stuck in exactly one of those, so the row names the stage.
+let workflow = { jobs: [], stats: { jobs: {}, outbox: {} } };
+
+const WF_STAGE = {
+  queued: "waiting to encode",
+  processing: "encode",
+  arr_reconcile: "rescan and rename",
+  autopulse: "AutoPulse",
+  done: "finished",
+};
+
+function wfActions(j) {
+  if (!j.actions.length) return "—";
+  return j.actions.map((a) =>
+    `<span class="tag ${STATUS_CLASS[a.status] || ""}" title="${
+      esc(a.error || "")}">${esc(WF_STAGE[a.action] || a.action)}: ${
+      esc(a.status)}${a.retries ? ` (${a.retries})` : ""}</span>`).join(" ");
+}
+
+function renderWorkflow() {
+  const jobs = workflow.jobs || [];
+  const failed = jobs.filter((j) => j.status === "failed").length;
+  el("wf-count").textContent = jobs.length || "";
+  el("wf-retry-all").disabled = failed === 0;
+
+  if (!jobs.length) {
+    el("workflow").innerHTML = `<div class="empty">No imports yet. A file
+      arrives here when Sonarr or Radarr posts to one of the webhook URLs
+      above.</div>`;
+    return;
+  }
+
+  const now = workflow.now || Date.now() / 1000;
+  el("workflow").innerHTML = `<table><thead><tr>
+      <th>File</th><th>From</th><th>Stage</th><th>Status</th>
+      <th>After the encode</th><th class="num">When</th><th></th>
+    </tr></thead><tbody>${jobs.map((j) => `<tr class="click"
+      data-path="${esc(j.path)}">
+      <td class="name">${esc(j.name)}${
+        j.error ? `<div class="muted bad">${esc(j.error)}</div>` : ""}</td>
+      <td>${esc(j.provider || "—")}${j.integration
+        ? ` <span class="muted">${esc(j.integration)}</span>` : ""}${
+        j.mode ? `<div class="muted">mode: ${esc(j.mode)}</div>` : ""}</td>
+      <td>${esc(WF_STAGE[j.stage] || j.stage)}</td>
+      <td>${statusTag(j.status)}${j.retries
+        ? ` <span class="muted">${j.retries} tries</span>` : ""}</td>
+      <td>${wfActions(j)}</td>
+      <td class="num">${ago(j.created_at, now)}</td>
+      <td>${j.status === "failed"
+        ? `<button class="small" data-wf-retry="${j.id}">Retry</button>` : ""}</td>
+    </tr>`).join("")}</tbody></table>`;
+
+  wireRows(el("workflow"));
+  el("workflow").querySelectorAll("[data-wf-retry]").forEach((b) =>
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (await act("/api/workflow/retry", { job_id: Number(b.dataset.wfRetry) })) {
+        loadWorkflow();
+      }
+    }));
+}
+
+async function loadWorkflow() {
+  const status = el("wf-status").value;
+  try {
+    workflow = await api("/api/workflow?limit=100"
+      + (status ? "&status=" + encodeURIComponent(status) : ""));
+    renderWorkflow();
+  } catch (e) {
+    el("workflow").innerHTML =
+      `<div class="empty bad">${esc(e.message)}</div>`;
+  }
+}
+
+el("wf-status").addEventListener("change", loadWorkflow);
+el("wf-refresh").addEventListener("click", loadWorkflow);
+el("wf-retry-all").addEventListener("click", async () => {
+  if (await act("/api/workflow/retry")) loadWorkflow();
+});
+
+/* ---------- backups ---------- */
+
+// Snapshots of the state database. Restoring one is the only destructive
+// thing the panel does to its own state, so it asks twice and refuses while
+// anything is queued - the server enforces that, this only explains it.
+let backups = { backups: [] };
+
+function renderBackups() {
+  const b = backups;
+  const now = Date.now() / 1000;
+  el("b-note").textContent = [
+    b.enabled ? `every ${b.interval_hours}h` : "automatic backups off",
+    `${b.count || 0} of ${b.keep} kept`,
+    b.last ? `newest ${ago(b.last, now)}` : "none taken yet",
+    b.enabled && b.next ? `next in ${hms(Math.max(0, b.next - now))}` : "",
+    b.dir || "",
+  ].filter(Boolean).join(" · ");
+
+  el("backups").innerHTML = (b.backups || []).length
+    ? `<table><thead><tr><th>Snapshot</th><th class="num">Size</th>
+        <th class="num">Taken</th><th></th></tr></thead><tbody>
+        ${b.backups.map((f) => `<tr>
+          <td class="name">${esc(f.name)}</td>
+          <td class="num">${bytes(f.size)}</td>
+          <td class="num">${ago(f.taken, now)}</td>
+          <td><button class="small danger" data-restore="${esc(f.name)}">Restore</button></td>
+        </tr>`).join("")}</tbody></table>`
+    : `<div class="empty">No snapshots yet. One is taken automatically
+       while the daemon runs, or take one now.</div>`;
+
+  el("backups").querySelectorAll("[data-restore]").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.restore;
+      if (!confirm(`Restore ${name}?
+
+Every file verdict, history record `
+        + "and queued import goes back to how it was when that snapshot was "
+        + "taken. The database being replaced is kept beside it. Media files "
+        + "are not touched.")) return;
+      if (!confirm("Last check: replace the live state database with "
+        + name + "?")) return;
+      btn.disabled = true;
+      const d = await act("/api/backups/restore", { name });
+      if (d) { backups = d; renderBackups(); } else { loadBackups(); }
+    }));
+}
+
+async function loadBackups() {
+  try {
+    backups = await api("/api/backups");
+    renderBackups();
+  } catch (e) {
+    el("backups").innerHTML = `<div class="empty bad">${esc(e.message)}</div>`;
+  }
+}
+
+el("b-run").addEventListener("click", async () => {
+  const d = await act("/api/backups/run", {}, "Snapshot written");
+  if (d) { backups = d; renderBackups(); }
+});
+
 /* ---------- boot ---------- */
 
 show(location.hash.slice(1) || "dashboard");
@@ -1106,6 +1588,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && current === "dashboard") tick();
 });
 setInterval(() => { if (current === "files") loadFiles(); }, 8000);
+setInterval(() => { if (current === "integrations") loadWorkflow(); }, 8000);
 setInterval(() => {
   if (current !== "libraries") return;
   if (libOpen.size === 0) loadLibraries(); else refreshLibStats();

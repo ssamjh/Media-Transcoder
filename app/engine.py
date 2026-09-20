@@ -131,8 +131,7 @@ class Engine:
 
         # Rehydrate accepted imports before workers start consuming.  The
         # database reset running jobs to pending when it opened.
-        for row in self.workflow.recoverable():
-            self._push_durable(row)
+        self.rehydrate()
 
         for i in range(max(1, self.cfg.workers.count)):
             t = threading.Thread(target=self._worker_loop, name=f"worker-{i}",
@@ -566,6 +565,14 @@ class Engine:
                 )
             self._stop.wait(1.0)
 
+    def rehydrate(self) -> int:
+        """Push durable work the database still owes back onto the queue."""
+        pushed = 0
+        for row in self.workflow.recoverable():
+            if self._push_durable(row):
+                pushed += 1
+        return pushed
+
     def backup_now(self) -> Path:
         """Snapshot the state database and prune old ones. Returns its path."""
         path = backup.run(self.db, self.cfg)
@@ -573,6 +580,44 @@ class Engine:
         self.next_backup = backup.next_due(
             backup.backup_dir(self.cfg), self.cfg.backup.interval_hours)
         return path
+
+    def restore_backup(self, name: str) -> Path | None:
+        """Put a snapshot back under the running daemon.
+
+        Restoring replaces the file every thread here is reading, so this
+        refuses while anything is queued or encoding rather than trying to
+        be clever about it - the panel says as much, and cancelling first
+        is a second's work. With the queue empty, the swap is: close the
+        connection, move the live file aside, copy the snapshot in, open it
+        again (which resets 'running' rows exactly as a restart would), and
+        push back whatever durable imports the snapshot still owes.
+
+        Returns where the replaced database was kept, or None if there was
+        nothing to keep.
+        """
+        directory = backup.backup_dir(self.cfg)
+        candidate = Path(name).name          # a name, never a path to anywhere
+        source = directory / candidate
+        if candidate != str(name) and Path(name) != source:
+            raise ValueError(f"{name} is not a snapshot in {directory}")
+        if source not in backup.list_backups(directory):
+            raise ValueError(f"no such snapshot: {candidate}")
+
+        with self._lock:
+            busy = len(self._queued)
+        if busy or self.scanning:
+            raise RuntimeError(
+                "cancel the queue and let the current scan finish before "
+                "restoring - the database is in use")
+
+        # Db.swap holds the database lock across the whole exchange, so a
+        # worker or the workflow thread waits for the restored file instead
+        # of meeting a closed connection - and a refused restore (a snapshot
+        # that will not open) leaves the daemon on the database it had.
+        kept = self.db.swap(lambda: backup.restore(source, self.cfg.state_db))
+        self.rehydrate()
+        log.warning("state database restored from %s", source)
+        return kept
 
     def _backup_loop(self) -> None:
         """One snapshot of the state database per configured interval.

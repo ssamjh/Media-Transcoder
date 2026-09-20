@@ -37,8 +37,8 @@ class PreflightTest(unittest.TestCase):
         with self.assertLogs("test.preflight", level="ERROR"):
             self.assertFalse(cli._preflight(self.cfg, self.log, check_temp=True))
 
-    def test_the_scratch_directory_is_only_checked_when_encoding(self):
-        """scan and check never write there, so they should not demand it."""
+    def test_the_scratch_directory_is_not_demanded_in_a_dry_run(self):
+        """A dry run encodes nothing, so it should not demand scratch space."""
         (self.root / "temp").write_text("not a directory", encoding="utf-8")
         self.assertTrue(cli._preflight(self.cfg, self.log, check_temp=False))
 

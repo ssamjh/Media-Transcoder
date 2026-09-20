@@ -15,8 +15,10 @@ payload stays untouched and keeps seeding. Putting the transcoder between the
 download client and the Arr leaves the Arr with no settled, managed file to
 identify. Don't.
 
-Order of work below: containers → libraries and modes → Arr webhooks →
-outbound Arr credentials → AutoPulse → Jellyfin → verify.
+Order of work below: containers → libraries and modes → integration
+profiles → Arr webhooks → AutoPulse → Jellyfin → verify. Everything from
+step 3 on is done in the panel's **Integrations** tab; the config file it
+writes is shown at the end of step 5 for anyone who prefers it.
 
 ---
 
@@ -82,13 +84,9 @@ grep api_key config/config.toml      # the key the Arrs will send
 
 ## 2. Libraries and modes
 
-A **library** says where files are; a **mode** says what happens to them. Add
-one library per Arr root, in the Libraries tab or from the CLI:
-
-```bash
-docker compose run --rm transcoder libraries --add "TV" --path /media/TV
-docker compose run --rm transcoder libraries --add "Movies" --path /media/Movies
-```
+A **library** says where files are; a **mode** says what happens to them. In
+the **Libraries** tab, press *Add library* once per Arr root - one for
+`/media/TV`, one for `/media/Movies` - and pick the mode each should use.
 
 A new library arrives **disabled**. Tick it on once its mode looks right.
 Libraries are what scheduled scans walk; the webhook path works even for a file
@@ -110,7 +108,34 @@ the x265 encode happens later, off the import path.
 waits in `pending` until you press *Queue pending*. Turn on
 `schedule.process_after_scan` once you trust the result.
 
-## 3. The webhook in Sonarr and Radarr
+## 3. Create the profile in the panel
+
+Open **Integrations** in the panel and press **Add Sonarr** or **Add Radarr**.
+Give it a name, ideally the same one the Arr calls itself, and press Create.
+
+The card that appears has the webhook URL for that profile, with a **Copy**
+button. It also says what is still missing: a fresh profile can receive
+webhooks but cannot talk back to the Arr yet.
+
+Press **Configure** on the card and fill in:
+
+| Field | Value |
+| --- | --- |
+| `url` | Base URL of that Arr as reachable from this container, such as `http://sonarr:8989`. |
+| `api_key` | The Arr's own key, from its **Settings → General → API Key**. Masked, with a Show box. |
+| `mode` | `cleanup` for imports. Empty means the file's library decides. |
+| `path_from` / `path_to` | Only if the mounts differ. Both or neither. |
+| `secret` | Optional, if this Arr should use its own key instead of the global one. |
+
+Press **Save changes**, then **Test**. The Test button calls that Arr's
+`system/status`, which proves the URL, the port and the key without asking it
+to do any work. It answers with the Arr's version, or with what went wrong.
+
+Every change is written straight to `config/config.toml`, so nothing needs a
+restart and the file stays the source of truth. Editing that file by hand
+still works; restart with `docker compose restart transcoder` if you do.
+
+## 4. Point the Arr at the webhook
 
 In each Arr: **Settings → Connect → + → Webhook**.
 
@@ -118,14 +143,13 @@ In each Arr: **Settings → Connect → + → Webhook**.
 | --- | --- |
 | Name | `Media-Transcoder` |
 | Triggers | **On Import** and **On Upgrade** only |
-| URL | `http://transcoder:8080/api/webhook/sonarr/tv` (Radarr: `.../radarr/movies`) |
+| URL | the URL copied from the profile card, such as `http://transcoder:8080/api/webhook/sonarr/tv-sonarr` |
 | Method | POST |
-| Headers | `X-Api-Key: <the key from config.toml>` |
+| Headers | `X-Api-Key: <the key from the Integrations tab>` |
 
-`Authorization: Bearer <key>` works too. The last path segment (`tv`,
-`movies`) is the integration profile id from step 4. With only one profile per
-provider configured you can use the bare `/api/webhook/sonarr`, and Arr's own
-`instanceName` is also matched against a profile's name.
+`Authorization: Bearer <key>` works too. With only one profile per provider
+you can shorten the URL to `/api/webhook/sonarr`, and the `instanceName` an Arr
+sends is matched against the profile name as well.
 
 Arr's **Test** button sends a `Test` event: it is acknowledged with
 `ignored: true` and queues nothing, which is the correct result. Rename,
@@ -141,15 +165,40 @@ it**. The transcoder calls AutoPulse itself, after the file and its Arr name
 are final; leaving the old one in place tells Jellyfin about a filename that is
 about to change.
 
-## 4. Outbound Arr credentials (rescan and rename)
+## 5. AutoPulse
 
-The webhook is inbound. The rescan/rename stage is outbound, and needs each
-Arr's URL and API key (**Settings → General → API Key** in the Arr). Add one
-profile per Arr instance to `config/config.toml`:
+AutoPulse is what actually pokes Jellyfin. It is the **AutoPulse** card at the
+bottom of the Integrations tab, shared by every profile. Tick it on, press
+**Configure**, and fill in:
+
+| Field | Value |
+| --- | --- |
+| `url` | `http://autopulse:2875` |
+| `username` / `password` | AutoPulse basic-auth credentials. The password is masked. |
+| `trigger_endpoint` | `/triggers/manual`, unless yours differs. |
+| `timeout`, `max_retries` | How long to wait, and how many times to retry before parking the job. |
+
+The transcoder calls `GET /triggers/manual?path=<final path>` with basic auth,
+using the path **after** the Arr rename, which is the point of doing it in this
+order. The `path` AutoPulse receives is the transcoder's path, so AutoPulse's
+own rewrite rules must map it to what Jellyfin sees: the same concern as step
+1, one hop further along.
+
+The card's **Test** button confirms the URL it will call. It does not fire a
+real trigger, because the only verb AutoPulse offers starts a real scan.
+
+AutoPulse is optional. Left off, the workflow finishes after the Arr
+reconciliation, and you can point Jellyfin at the file another way. See the
+next step.
+
+### The same thing in config.toml
+
+The panel writes this. It is here so you can read what it wrote, or set it up
+without the panel:
 
 ```toml
 [[integrations.sonarr]]
-id = "tv"                     # the <id> in /api/webhook/sonarr/<id>
+id = "tv-sonarr"              # the <id> in /api/webhook/sonarr/<id>
 name = "TV Sonarr"            # also matched against Arr's instanceName
 enabled = true
 mode = "cleanup"              # one-shot mode for files from this Arr
@@ -170,27 +219,7 @@ enabled = true
 mode = "cleanup"
 url = "http://radarr:7878"
 api_key = "radarr-api-key"
-```
 
-- `url` and `api_key` are **required** for the rescan/rename stage. Without
-  them the job fails at `arr_reconcile` and AutoPulse is never called with a
-  stale name.
-- `path_from`/`path_to` map the Arr's view of the library onto the
-  transcoder's. Set **both or neither**. Config validation rejects one alone.
-  With identical mounts, leave both empty.
-- `mode` is the one-shot mode applied to files arriving from this Arr.
-- `secret` lets an Arr authenticate with its own credential instead of the
-  global key.
-- A 4K Radarr and an HD Radarr are two profiles, two webhook URLs, and can name
-  different modes.
-
-Restart after editing the file by hand: `docker compose restart transcoder`.
-
-## 5. AutoPulse
-
-AutoPulse is what actually pokes Jellyfin. One block, shared by every profile:
-
-```toml
 [integrations.autopulse]
 enabled = true
 url = "http://autopulse:2875"
@@ -201,15 +230,14 @@ timeout = 15.0
 max_retries = 3
 ```
 
-The transcoder calls `GET /triggers/manual?path=<final path>` with HTTP basic
-auth, using the path **after** the Arr rename, which is the point of doing it
-in this order. The `path` AutoPulse receives is the transcoder's path, so
-AutoPulse's own rewrite rules must map it to what Jellyfin sees (the same
-concern as step 1, one hop further along).
-
-AutoPulse is optional. With `enabled = false` the workflow finishes after the
-Arr reconciliation, and you can point Jellyfin at the file some other way,
-see the next step.
+- `url` and `api_key` are **required** for the rescan/rename stage. Without
+  them the job fails at `arr_reconcile`, and AutoPulse is never called with a
+  stale name.
+- `path_from`/`path_to` map the Arr's view of the library onto the
+  transcoder's. Set **both or neither**. Validation rejects one alone, and the
+  panel refuses the save rather than applying half of it.
+- A 4K Radarr and an HD Radarr are two profiles, two webhook URLs, and can
+  name different modes.
 
 ## 6. Jellyfin
 
@@ -241,13 +269,19 @@ Test one without encoding anything: *Send test* in the panel, or
 
 ## 7. Check it works
 
+The Integrations tab is the first place to look: each card says whether its
+credentials are complete, and **Test** proves them.
+
+Below the profiles, the **Imports** list is the durable queue itself: one row
+per accepted import, the stage it reached, what the Arr and AutoPulse hand-offs
+did, and the error if one of them refused. The same thing over HTTP:
+
 ```bash
 curl -s http://transcoder:8080/health                       # no key needed
-curl -s -H "X-Api-Key: $KEY" http://transcoder:8080/api/status | jq .workflow
+curl -s -H "X-Api-Key: $KEY" http://transcoder:8080/api/workflow | jq .
 ```
 
-`workflow` counts durable jobs and outbox actions by status. A healthy import
-moves through the stages:
+A healthy import moves through the stages:
 
 ```text
 processing -> arr_reconcile -> autopulse -> complete
@@ -274,13 +308,15 @@ curl -s -X POST -H "X-Api-Key: $KEY" http://transcoder:8080/api/workflow/retry \
 | Webhook returns 400, "no final file path" / "no series id" | Not an import event, or a custom payload. Use Arr's own Webhook connection, not a custom script. |
 | Job fails at `processing`, file not found | Path mismatch: fix the mounts, or set `path_from`/`path_to`. |
 | Job fails at `arr_reconcile` | Arr `url`/`api_key` missing or wrong, or the Arr is slow. Raise `command_timeout`. |
+| Not sure a profile's credentials are right | Press **Test** on its card in the Integrations tab. It calls the Arr's `system/status` and answers with its version. |
 | Job fails at `autopulse` | AutoPulse URL, credentials, or `trigger_endpoint`. |
 | Jellyfin shows the old filename | An Arr → AutoPulse webhook is still firing on import. Remove it. |
 | Nothing is ever encoded | Library disabled, or scanned work is still `pending`. Press *Queue pending*, or set `schedule.process_after_scan`. |
 
 The database behind all of this is snapshotted daily into `config/backups/`
-and the last seven are kept; see [Backups](README.md#backups) for restoring
-one.
+and the last seven are kept. Settings -> Database snapshots lists them, takes
+one on demand, and restores one without stopping the daemon; see
+[Backups](README.md#backups).
 
 ## A complete worked example
 

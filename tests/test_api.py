@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app import backup as backup_mod  # noqa: E402
 from app import config as cfgmod      # noqa: E402
 from app.config import Config         # noqa: E402
 from app.db import Db                 # noqa: E402
@@ -66,6 +67,12 @@ class ApiTest(unittest.TestCase):
         with self.engine._lock:
             self.engine._queued.clear()
             self.engine._cancelled.clear()
+        # Snapshots live beside the state database, which is shared by every
+        # test in this class: one test taking a backup must not decide what
+        # the next one sees.
+        for snapshot in backup_mod.list_backups(
+                backup_mod.backup_dir(self.cfg)):
+            snapshot.unlink()
         self.db.upsert(self.A, size=1000, mtime=1.0, status="pending",
                        library="tv",
                        reasons=["encode video h264 -> x265 crf 22"], height=1080,
@@ -402,6 +409,40 @@ class ApiTest(unittest.TestCase):
 
         status, _ = self.get("/api/status")
         self.assertEqual(status["backup"]["count"], 1)
+
+    def test_a_snapshot_can_be_restored_from_the_panel(self):
+        d, _ = self.post("/api/backups/run", {})
+        name = Path(d["path"]).name
+
+        gone = str(Path("/media/TV/later.mkv"))
+        self.db.upsert(gone, size=1, mtime=1.0, status="pending",
+                       library="tv", reasons=[])
+        self.assertIsNotNone(self.db.get(gone))
+
+        d, status = self.post("/api/backups/restore", {"name": name})
+        self.assertEqual(status, 200)
+        self.assertIn("restored", d["message"])
+        self.assertIsNone(self.db.get(gone))
+        # The API is still answering off the swapped-in connection.
+        self.assertEqual(self.get("/api/status")[1], 200)
+
+    def test_restore_will_not_read_a_file_outside_the_backup_directory(self):
+        for name in ("../config.toml", "state.db", ""):
+            _, status = self.post("/api/backups/restore", {"name": name})
+            self.assertIn(status, (400, 404), name)
+
+    def test_restore_is_refused_while_work_is_queued(self):
+        d, _ = self.post("/api/backups/run", {})
+        with self.engine._lock:
+            self.engine._queued.add(self.A)
+        try:
+            d, status = self.post("/api/backups/restore",
+                                  {"name": Path(d["path"]).name})
+            self.assertEqual(status, 409)
+            self.assertIn("cancel", d["error"])
+        finally:
+            with self.engine._lock:
+                self.engine._queued.discard(self.A)
 
     def test_status_lists_libraries(self):
         d, _ = self.get("/api/status")

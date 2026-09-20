@@ -486,6 +486,81 @@ LIB_META: dict[str, dict[str, Any]] = {
 }
 
 
+# Integration profiles are named records rather than global fields, so they
+# carry their own metadata table, same as a library or a mode. "secret" marks
+# a credential: the panel renders it masked. It is not a storage guarantee -
+# config.toml holds these in plain text, and the panel is trusted-network
+# only either way.
+
+ARR_SECTIONS: dict[str, str] = {"": "Connection"}
+
+ARR_META: dict[str, dict[str, Any]] = {
+    "id": {"desc": "Stable identifier, used in the webhook URL "
+                   "(/api/webhook/sonarr/<id>). Generated from the name.",
+           "readonly": True},
+    "name": {"desc": "Display name. Also matched against the instanceName "
+                     "an Arr sends in its payload, so it is worth setting it "
+                     "to the same thing."},
+    "enabled": {"desc": "Accept webhooks from this instance."},
+    "mode": {"desc": "Processing mode applied to files arriving from this "
+                     "instance, for that run only. Empty means the mode the "
+                     "file's library normally uses.",
+             "choices": []},
+    "url": {"desc": "Base URL of this Sonarr/Radarr, as reachable from this "
+                    "container. Required for the rescan and rename stage.",
+            "hint": "http://sonarr:8989"},
+    "api_key": {"desc": "The Arr's own API key, from its Settings > General. "
+                        "Required for the rescan and rename stage.",
+                "secret": True},
+    "path_from": {"desc": "Path prefix as the Arr writes it. Leave both path "
+                          "fields empty when the media is mounted at the same "
+                          "place in both containers.",
+                  "hint": "/arr/media"},
+    "path_to": {"desc": "The same directory as mounted here. Set both path "
+                        "fields or neither.",
+                "hint": "/media"},
+    "request_timeout": {
+        "desc": "Seconds to wait for an ordinary API call.",
+        "min": 0.5, "max": 3600},
+    "command_timeout": {
+        "desc": "Seconds to wait for a rescan or rename command to finish. "
+                "Raise it for a large library on slow storage.",
+        "min": 0.5, "max": 3600},
+    "poll_interval": {
+        "desc": "Seconds between checks while a command runs.",
+        "min": 0.5, "max": 3600},
+    "max_retries": {
+        "desc": "How many times a failed rescan/rename is retried before the "
+                "job is parked for an explicit retry.",
+        "min": 0, "max": 10},
+    "secret": {"desc": "Optional per-instance key this Arr may send instead "
+                       "of the global API key.",
+               "secret": True},
+}
+
+AUTOPULSE_SECTIONS: dict[str, str] = {"": "AutoPulse"}
+
+AUTOPULSE_META: dict[str, dict[str, Any]] = {
+    "enabled": {"desc": "Hand the final path to AutoPulse once the file is "
+                        "processed and the Arr has renamed it. Off means the "
+                        "workflow finishes after the Arr reconciliation."},
+    "url": {"desc": "Base URL of AutoPulse.", "hint": "http://autopulse:2875"},
+    "username": {"desc": "Basic-auth username."},
+    "password": {"desc": "Basic-auth password.", "secret": True},
+    "api_key": {"desc": "Unused. AutoPulse authenticates with the username "
+                        "and password above.", "readonly": True,
+                "secret": True},
+    "trigger_endpoint": {
+        "desc": "Path of the manual trigger, called as GET with ?path=."},
+    "timeout": {"desc": "Seconds to wait for the trigger.",
+                "min": 0.5, "max": 300},
+    "max_retries": {
+        "desc": "How many times a failed trigger is retried before the job is "
+                "parked for an explicit retry.",
+        "min": 0, "max": 10},
+}
+
+
 MODE_META: dict[str, dict[str, Any]] = {
     "id": {"desc": "Stable identifier, used as \"mode\" in the API call.",
            "readonly": True},
@@ -702,6 +777,9 @@ def _describe(holder: Any, section: str, meta: dict[str, dict[str, Any]],
             "choices": m.get("choices"),
             "restart": bool(m.get("restart")),
             "readonly": bool(m.get("readonly")),
+            # A credential the panel masks rather than prints. config.toml
+            # still holds it in plain text; this is legibility, not secrecy.
+            "secret": bool(m.get("secret")),
             "hint": m.get("hint"),
         })
     return entries
@@ -757,6 +835,35 @@ def integration_schema(cfg: Config) -> dict[str, Any]:
         "password_configured": bool(auto.password),
         "timeout": auto.timeout,
     }
+    return out
+
+
+def arr_schema(instance: ArrInstanceCfg,
+               cfg: Config | None = None) -> list[dict[str, Any]]:
+    """Describe one Sonarr/Radarr profile, for the panel to render."""
+    out = []
+    for section, title in ARR_SECTIONS.items():
+        holder = instance if section == "" else getattr(instance, section)
+        entries = _describe(holder, section, ARR_META)
+        if cfg is not None:
+            for entry in entries:
+                if entry["key"] == "mode":
+                    # "" is a real choice: use whatever the file's library
+                    # would have used anyway.
+                    entry["choices"] = [""] + [m.id for m in cfg.modes]
+        if entries:
+            out.append({"section": section, "title": title, "fields": entries})
+    return out
+
+
+def autopulse_schema(cfg: Config) -> list[dict[str, Any]]:
+    """Describe the single AutoPulse destination."""
+    out = []
+    for section, title in AUTOPULSE_SECTIONS.items():
+        holder = cfg.integrations.autopulse
+        entries = _describe(holder, section, AUTOPULSE_META)
+        if entries:
+            out.append({"section": section, "title": title, "fields": entries})
     return out
 
 
@@ -1132,6 +1239,83 @@ def remove_library(cfg: Config, lib_id: str) -> LibraryCfg:
         raise ConfigError(f"no such library: {lib_id}")
     cfg.libraries.remove(lib)
     return lib
+
+
+# --- integrations -----------------------------------------------------------
+
+def _provider(provider: str) -> str:
+    key = str(provider or "").strip().lower()
+    if key not in ("sonarr", "radarr"):
+        raise ConfigError(f"unknown provider: {provider}")
+    return key
+
+
+def arr_instance(cfg: Config, provider: str,
+                 instance_id: str) -> ArrInstanceCfg | None:
+    wanted = str(instance_id or "").strip().casefold()
+    return next((i for i in cfg.integrations.instances(_provider(provider))
+                 if i.id.casefold() == wanted), None)
+
+
+def add_arr_instance(cfg: Config, provider: str,
+                     name: str) -> ArrInstanceCfg:
+    """Create a profile. Disabled fields are filled in by the panel after."""
+    key = _provider(provider)
+    label = str(name or "").strip()
+    if not label:
+        raise ConfigError("an integration needs a name")
+    instances = cfg.integrations.instances(key)
+    instance = ArrInstanceCfg(
+        id=slugify(label, {i.id for i in instances}),
+        name=label,
+        # Enabled, but inert: with no url and api_key the reconcile stage
+        # refuses, and with no webhook pointed at it nothing arrives. The
+        # alternative, a profile that silently ignores its own webhook, is
+        # the more confusing of the two.
+        enabled=True,
+    )
+    instances.append(instance)
+    try:
+        _validate_global(cfg)
+    except ConfigError:
+        instances.remove(instance)
+        raise
+    return instance
+
+
+def remove_arr_instance(cfg: Config, provider: str,
+                        instance_id: str) -> ArrInstanceCfg:
+    key = _provider(provider)
+    instance = arr_instance(cfg, key, instance_id)
+    if instance is None:
+        raise ConfigError(f"no such {key} integration: {instance_id}")
+    cfg.integrations.instances(key).remove(instance)
+    return instance
+
+
+def apply_arr_updates(cfg: Config, instance: ArrInstanceCfg,
+                      updates: dict[str, Any]) -> list[str]:
+    """Update one profile, or leave it exactly as it was.
+
+    Transactional for the same reason a mode is: path_from/path_to are only
+    valid as a pair, and a half-applied profile would be live for the next
+    webhook that arrives.
+    """
+    return _transactional(
+        instance,
+        lambda: _apply(instance, updates, ARR_META),
+        lambda: _validate_global(cfg),
+    )
+
+
+def apply_autopulse_updates(cfg: Config,
+                            updates: dict[str, Any]) -> list[str]:
+    auto = cfg.integrations.autopulse
+    return _transactional(
+        auto,
+        lambda: _apply(auto, updates, AUTOPULSE_META),
+        lambda: _validate_global(cfg),
+    )
 
 
 # --- modes ------------------------------------------------------------------

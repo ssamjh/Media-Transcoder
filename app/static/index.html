@@ -16,6 +16,7 @@
       <button data-tab="dashboard" class="on">Dashboard</button>
       <button data-tab="libraries">Libraries</button>
       <button data-tab="modes">Modes</button>
+      <button data-tab="integrations">Integrations</button>
       <button data-tab="files">Files</button>
       <button data-tab="history">History</button>
       <button data-tab="settings">Settings</button>
@@ -32,6 +33,7 @@
     <div class="toolbar">
       <button id="btn-scan" class="primary">Scan now</button>
       <button id="btn-queue">Queue pending</button>
+      <button id="btn-path">Check a file&hellip;</button>
       <button id="btn-cancel-all" class="danger">Cancel all</button>
       <label class="toggle">
         <input type="checkbox" id="sched-toggle">
@@ -74,6 +76,39 @@
         only.</span>
     </div>
     <div id="modes"></div>
+  </section>
+
+  <!-- INTEGRATIONS -->
+  <section id="tab-integrations" hidden>
+    <div class="toolbar">
+      <button id="i-add-sonarr" class="primary">Add Sonarr</button>
+      <button id="i-add-radarr" class="primary">Add Radarr</button>
+      <span class="muted">One profile per Sonarr or Radarr instance. Each gets
+        its own webhook URL to paste into that application.</span>
+    </div>
+    <div id="integrations"></div>
+
+    <h2>AutoPulse</h2>
+    <div id="autopulse"></div>
+
+    <h2>Imports <span id="wf-count" class="count"></span></h2>
+    <div class="toolbar">
+      <select id="wf-status">
+        <option value="">All</option>
+        <option value="failed">Failed</option>
+        <option value="pending">Pending</option>
+        <option value="running">Running</option>
+        <option value="waiting">Waiting</option>
+        <option value="done">Done</option>
+      </select>
+      <button id="wf-refresh">Refresh</button>
+      <div class="spacer"></div>
+      <button id="wf-retry-all">Retry all failed</button>
+    </div>
+    <div id="workflow" class="card tablewrap"><div class="empty">Loading&hellip;</div></div>
+
+    <h2>API key</h2>
+    <div id="integration" class="card"></div>
   </section>
 
   <!-- FILES -->
@@ -122,10 +157,15 @@
       <div class="spacer"></div>
       <button id="s-toml">View file</button>
     </div>
-    <div id="settings"></div>
+    <h2>Database snapshots</h2>
+    <div class="toolbar">
+      <button id="b-run">Back up now</button>
+      <span id="b-note" class="muted"></span>
+    </div>
+    <div id="backups" class="card tablewrap"><div class="empty">Loading&hellip;</div></div>
 
-    <h2>Integration</h2>
-    <div id="integration" class="card"></div>
+    <h2>All settings</h2>
+    <div id="settings"></div>
   </section>
 
 </main>

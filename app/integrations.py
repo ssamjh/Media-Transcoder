@@ -488,6 +488,15 @@ class ArrClient:
                 return converted
         return value
 
+    def system_status(self) -> Any:
+        """Cheapest authenticated call an Arr offers.
+
+        Used by the panel's Test button: it proves the URL resolves, the
+        port is right and the API key is accepted, without asking the Arr to
+        do any work.
+        """
+        return self._request("GET", "/api/v3/system/status")
+
     def reconcile(
         self,
         entity_id: int | str,

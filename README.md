@@ -19,7 +19,6 @@ download client -> Sonarr/Radarr import -> Media-Transcoder
 - [What each stage does](#what-each-stage-does)
 - [How the stereo track is made](#how-the-stereo-track-is-made)
 - [The panel](#the-panel)
-- [Command line](#command-line)
 - [Sonarr and Radarr](#sonarr-and-radarr)
 - [Notifications](#notifications)
 - [Safety](#safety)
@@ -58,11 +57,8 @@ docker compose up -d --build
 **2. Open the panel** at <http://localhost:8080>. First start writes a fully
 commented `config/config.toml` and generates an API key.
 
-**3. Add a library** in the Libraries tab, or:
-
-```bash
-docker compose run --rm transcoder libraries --add "TV" --path /media/TV
-```
+**3. Add a library** in the Libraries tab: give it a name and the path it
+covers, pick the mode it should use.
 
 **4. Scan, read the Files tab, then queue.** A new library arrives switched
 off. Tick it on when its mode looks right.
@@ -151,9 +147,10 @@ matrix, no centre-channel boost. libfdk_aac when the build has it, native
 | **Dashboard** | Live counters, what is encoding with speed and ETA, the queue, last scan results, recent history. Buttons: *Scan now*, *Queue pending*, *Cancel all*, and a schedule toggle. |
 | **Libraries** | One card per library: paths, its mode, its counts and reclaimed bytes. *Configure* edits routing inline. *Scan* scans just that one. |
 | **Modes** | One card per mode: what it does, which libraries use it, all settings behind *Configure*. Editing one changes every library on it, and the card names them. |
+| **Integrations** | One card per Sonarr/Radarr profile: its webhook URL to copy, whether its credentials are complete, a Test button, and every setting behind *Configure*. The AutoPulse destination and the API key live here too. Below them, **Imports**: every import a webhook has accepted, the stage it is in, and *Retry* on the ones that failed. |
 | **Files** | Every tracked file, with search and filters. Click a row for the full plan, its state, past runs, and per-file actions. |
 | **History** | Every run: before, after, percentage saved, how long. |
-| **Settings** | Global settings with their documentation, validated on save. |
+| **Settings** | **Database snapshots** - the backups on disk, *Back up now*, and *Restore* - followed by every global setting with its documentation, validated on save. |
 
 Jobs report encode progress and copy-back progress separately. Only one file
 is copied back at a time however many workers are running, because the library
@@ -162,62 +159,30 @@ job waiting its turn says *waiting to copy*.
 
 Every change made in the panel is written straight to `config.toml`.
 
-## Command line
+## There is no command line
 
-```bash
-# libraries and modes
-docker compose run --rm transcoder libraries
-docker compose run --rm transcoder libraries --add "TV" --path /media/TV
-docker compose run --rm transcoder libraries -L tv --set mode=cleanup
-docker compose run --rm transcoder modes
-docker compose run --rm transcoder modes --add "Subs only" --copy-from cleanup
-docker compose run --rm transcoder modes -m standard --set video.crf_1080p=21
+The daemon is the only thing the image runs, and the panel and its API are
+the only way to drive it. Scanning a library, planning or processing a single
+file, editing libraries, modes and integrations, taking and restoring a
+backup: all of it is a button, and all of it is an endpoint listed under
+[API](#api). One way to do a thing beats two that can disagree.
 
-# scanning and processing
-docker compose run --rm transcoder scan               # report, touch nothing
-docker compose run --rm transcoder scan -L tv         # one library
-docker compose run --rm transcoder scan --no-cache    # re-probe everything
-docker compose run --rm transcoder check "/media/TV/Show/S01E01.mkv"
-docker compose run --rm transcoder check -m cleanup "/media/TV/Show/S01E01.mkv"
-docker compose run --rm transcoder run                # scan, then process
-docker compose run --rm transcoder run --dry-run      # log, encode nothing
-docker compose run --rm transcoder process "/media/TV/Show/S01E01.mkv"
-
-# state
-docker compose run --rm transcoder status --failed
-docker compose run --rm transcoder config --set workers.pools=8
-docker compose run --rm transcoder backup             # snapshot now
-docker compose run --rm transcoder backup --list
-```
-
-`scan`, `check`, `libraries`, `modes` and `backup` take `--json`.
-
-What a scan prints:
-
-```
-File        Library  Res   Video         Audio   Subs    Size
-----------  -------  ----  ------------  ------  ------  ------
-sample.mkv  Movies   720p  h264 copy     2 kept  2 kept  579 KB
-sample.mkv  TV       720p  h264 -> x265  2 kept  1 kept  579 KB
-
-  sample.mkv
-      - drop extra audio
-      - add aac stereo downmix
-      x drop audio ac3 6ch fre
-```
+The *Check a file...* button on the Dashboard is the one that replaces a
+terminal habit: give it any path inside a library and it plans that file, or
+processes it, without waiting for a scan to notice it.
 
 ## Sonarr and Radarr
 
 **Full walkthrough: [SETUP.md](SETUP.md).** The short version:
 
-1. Add a Webhook connection in each Arr, **On Import** and **On Upgrade**,
-   pointing at `POST /api/webhook/sonarr/<id>` or `/api/webhook/radarr/<id>`,
-   with the API key as an `X-Api-Key` header.
-2. Put the Arr's own url and api_key in `[[integrations.sonarr]]` or
-   `[[integrations.radarr]]`, so the transcoder can ask it to rescan and
-   rename.
-3. Turn on `[integrations.autopulse]` to hand the final path to Jellyfin.
-4. Remove any existing Arr-to-AutoPulse hook for import events.
+1. **Integrations tab → Add Sonarr / Add Radarr.** Name it, then fill in that
+   application's url and api_key so the transcoder can ask it to rescan and
+   rename. Press **Test** to prove the credentials.
+2. **Copy the webhook URL from the card** into that Arr under
+   Settings → Connect → Webhook, with **On Import** and **On Upgrade** ticked
+   and the API key as an `X-Api-Key` header.
+3. **Turn on the AutoPulse card** to hand the final path to Jellyfin.
+4. **Remove any existing Arr-to-AutoPulse hook** for import events.
 
 **The chain starts after the Arr import, deliberately.** With copy imports (no
 hard links) only the library copy changes, so the torrent payload keeps
@@ -357,14 +322,12 @@ config/backups/state-2026-01-07.db
 - Settings under `[backup]`, or Backups in the settings panel: `enabled`,
   `interval_hours` (24), `keep` (7), `dir`.
 
-Restoring checks the snapshot opens first, then moves the current database
-aside as `state.db.replaced-<timestamp>` rather than deleting it:
-
-```bash
-docker compose stop transcoder
-docker compose run --rm transcoder backup --restore /config/backups/state-2026-01-06.db
-docker compose start transcoder
-```
+Restore from **Settings -> Database snapshots -> Restore**. The daemon does
+not have to be stopped: it refuses while anything is queued or encoding, and
+otherwise closes the database, checks the snapshot opens, moves the current
+one aside as `state.db.replaced-<timestamp>` rather than deleting it, and
+reopens on the restored file. Imports the snapshot still owes are pushed back
+onto the queue, exactly as a restart would.
 
 Nothing is re-encoded because of a restore. The next scan re-probes what the
 restored database does not remember, and planning is idempotent, so a
@@ -420,6 +383,13 @@ The panel is a client of a plain JSON API.
 | POST | `/api/check` | `{"path": "...", "mode": null}`, plan one file |
 | POST | `/api/process` | `{"path": "...", "mode": null, "force": false}` |
 | POST | `/api/webhook/sonarr/<id>` | native Arr import hook |
+| GET | `/api/integrations` | Arr profiles, AutoPulse, webhook URLs, schemas |
+| POST | `/api/integrations/add` | `{"provider": "sonarr", "name": "TV"}` |
+| POST | `/api/integrations/update` | `{"provider": "sonarr", "id": "tv", "updates": {...}}` |
+| POST | `/api/integrations/delete` | `{"provider": "sonarr", "id": "tv"}` |
+| POST | `/api/integrations/autopulse` | `{"updates": {"enabled": true}}` |
+| POST | `/api/integrations/test` | `{"provider": "sonarr", "id": "tv"}`, checks credentials |
+| GET | `/api/workflow` | `?status=&limit=`, accepted imports and their stages |
 | POST | `/api/workflow/retry` | `{}` or `{"job_id": 12}`, no re-encode |
 | POST | `/api/cancel` / `/api/cancel-all` | stop work |
 | POST | `/api/queue-pending` | queue everything that needs work |
@@ -429,12 +399,13 @@ The panel is a client of a plain JSON API.
 | POST | `/api/history/clear` | wipe history, keep file state |
 | GET | `/api/backups` | daily database snapshots, newest first |
 | POST | `/api/backups/run` | take a snapshot now |
+| POST | `/api/backups/restore` | `{"name": "state-2026-01-06.db"}`, refused while busy |
 
 ## Development
 
 ```bash
 python -m unittest discover -s tests -v
-python -m app -c ./config/config.toml scan
+python -m app -c ./config/config.toml      # the daemon, panel on :8080
 ```
 
 Planning rules are pure functions over ffprobe output, so most of the suite

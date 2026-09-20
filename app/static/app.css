@@ -291,6 +291,15 @@ pre.toml {
 }
 .stage.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .stage.off { text-decoration: line-through; opacity: .65; }
+/* The webhook URL is meant to be copied, so the button sits with it. */
+.lib-paths { display: flex; align-items: center; gap: 10px; }
+.lib-paths button { flex: none; }
+/* Show box next to a masked credential. */
+.field .hint.reveal {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+}
+.field .hint.reveal input[type=checkbox] { width: 13px; height: 13px; }
+
 .newlib { display: grid; gap: 10px; }
 .newlib label { font-weight: 550; font-size: 13px; display: block; margin-bottom: 4px; }
 .newlib input, .newlib textarea {
