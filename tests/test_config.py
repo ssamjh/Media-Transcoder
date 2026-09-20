@@ -150,7 +150,8 @@ class TestRoundTrip(unittest.TestCase):
         c.integrations.autopulse = cfgmod.AutoPulseCfg(
             enabled=True, url="http://autopulse", username="u",
             password="p", trigger_endpoint="/triggers/manual",
-            max_retries=5)
+            sonarr_endpoint="/triggers/sonarr",
+            radarr_endpoint="/triggers/radarr", max_retries=5)
         back = cfgmod.loads(cfgmod.dump_toml(c))
         self.assertEqual(back, c)
         redacted = cfgmod.integration_schema(c)
@@ -158,6 +159,31 @@ class TestRoundTrip(unittest.TestCase):
         self.assertNotIn("arr-key", str(redacted))
         self.assertTrue(redacted["autopulse"]["password_configured"])
         self.assertNotIn("p", redacted["autopulse"])
+
+
+class TestAutoPulseEndpoints(unittest.TestCase):
+    def cfg(self, **kwargs):
+        c = Config()
+        c.integrations.autopulse = cfgmod.AutoPulseCfg(
+            enabled=True, url="http://autopulse:2875", **kwargs)
+        return c
+
+    def test_an_unset_override_uses_the_shared_trigger(self):
+        auto = self.cfg(sonarr_endpoint="/triggers/sonarr").integrations.autopulse
+        self.assertEqual(auto.endpoint_for("sonarr"), "/triggers/sonarr")
+        self.assertEqual(auto.endpoint_for("radarr"), "/triggers/manual")
+        self.assertEqual(auto.endpoint_for(None), "/triggers/manual")
+        self.assertEqual(auto.endpoint_for("nonsense"), "/triggers/manual")
+
+    def test_an_override_without_a_leading_slash_is_refused(self):
+        """Caught in the panel, not at 3am when the hook fires."""
+        c = self.cfg(radarr_endpoint="/triggers/radarr")
+        with self.assertRaises(ConfigError):
+            cfgmod.apply_autopulse_updates(
+                c, {"radarr_endpoint": "triggers/radarr"})
+        # apply_autopulse_updates is transactional: the good value survives.
+        self.assertEqual(c.integrations.autopulse.radarr_endpoint,
+                         "/triggers/radarr")
 
 
 class TestLibraries(unittest.TestCase):

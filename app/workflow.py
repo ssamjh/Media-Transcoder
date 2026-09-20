@@ -221,7 +221,8 @@ class Workflow:
                 else:
                     self._complete_job(row["job_id"], final_path)
             elif row["action"] == "autopulse":
-                self._send_autopulse(str(payload["final_path"]))
+                self._send_autopulse(str(payload["final_path"]),
+                                     payload.get("provider"))
                 self._complete_job(row["job_id"], str(payload["final_path"]))
             else:
                 raise integrations.IntegrationError(
@@ -263,14 +264,19 @@ class Workflow:
             final_path=payload.get("final_path"))
         return result.final_path
 
-    def _send_autopulse(self, path: str) -> None:
+    def _send_autopulse(self, path: str, provider: str | None = None) -> None:
         cfg = self.cfg.integrations.autopulse
         if not _value(cfg, "url", ""):
             raise integrations.IntegrationError("AutoPulse url is not configured")
+        # An install with one named trigger per Arr needs the file's origin to
+        # pick between them; without an override this is trigger_endpoint.
+        chooser = getattr(cfg, "endpoint_for", None)
+        endpoint = (chooser(provider) if chooser
+                    else _value(cfg, "trigger_endpoint", "/triggers/manual"))
         client = integrations.AutoPulseClient(
             cfg.url, username=_value(cfg, "username", None),
             password=_value(cfg, "password", None),
-            endpoint=_value(cfg, "trigger_endpoint", "/triggers/manual"),
+            endpoint=endpoint or "/triggers/manual",
             timeout=float(_value(cfg, "timeout", 15)))
         client.trigger(path)
 

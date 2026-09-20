@@ -1067,9 +1067,19 @@ class Handler(BaseHTTPRequestHandler):
             auto = self.engine.cfg.integrations.autopulse
             if not auto.url.strip():
                 raise ApiError("AutoPulse has no url configured")
-            target = auto.url.rstrip("/") + "/" + auto.trigger_endpoint.lstrip("/")
+            base = auto.url.rstrip("/")
+            targets = {
+                origin: base + "/" + auto.endpoint_for(origin).lstrip("/")
+                for origin in ("sonarr", "radarr")
+            }
+            if len(set(targets.values())) == 1:
+                message = ("AutoPulse will be called at "
+                           + next(iter(targets.values())))
+            else:
+                message = "AutoPulse will be called at " + ", ".join(
+                    f"{origin}: {url}" for origin, url in targets.items())
             return {"ok": True, "provider": "autopulse",
-                    "message": f"AutoPulse will be called at {target}"}
+                    "targets": targets, "message": message}
 
         provider, instance = self._arr_profile(body)
         if not instance.url or not instance.api_key:

@@ -319,8 +319,20 @@ class AutoPulseCfg:
     username: str = ""
     password: str = ""
     trigger_endpoint: str = "/triggers/manual"
+    sonarr_endpoint: str = ""
+    radarr_endpoint: str = ""
     timeout: float = 15.0
     max_retries: int = 3
+
+    def endpoint_for(self, provider: str | None) -> str:
+        """Which trigger a file's origin should be announced to.
+
+        AutoPulse installs commonly expose one named trigger per Arr rather
+        than a single manual one. An unset override falls back to
+        `trigger_endpoint`, so a single-trigger install is unaffected.
+        """
+        override = getattr(self, f"{str(provider or '').strip().lower()}_endpoint", "")
+        return override or self.trigger_endpoint
 
 
 @dataclass
@@ -551,7 +563,14 @@ AUTOPULSE_META: dict[str, dict[str, Any]] = {
                         "and password above.", "readonly": True,
                 "secret": True},
     "trigger_endpoint": {
-        "desc": "Path of the manual trigger, called as GET with ?path=."},
+        "desc": "Path of the manual trigger, called as GET with ?path=. Used "
+                "for any file whose origin has no trigger of its own below."},
+    "sonarr_endpoint": {
+        "desc": "Trigger for files that arrived from Sonarr. Empty means use "
+                "the trigger above.", "hint": "/triggers/sonarr"},
+    "radarr_endpoint": {
+        "desc": "Trigger for files that arrived from Radarr. Empty means use "
+                "the trigger above.", "hint": "/triggers/radarr"},
     "timeout": {"desc": "Seconds to wait for the trigger.",
                 "min": 0.5, "max": 300},
     "max_retries": {
@@ -830,6 +849,8 @@ def integration_schema(cfg: Config) -> dict[str, Any]:
         "url": auto.url,
         "username": auto.username,
         "trigger_endpoint": auto.trigger_endpoint,
+        "sonarr_endpoint": auto.sonarr_endpoint,
+        "radarr_endpoint": auto.radarr_endpoint,
         "max_retries": auto.max_retries,
         "api_key_configured": bool(auto.api_key),
         "password_configured": bool(auto.password),
@@ -1086,8 +1107,11 @@ def _validate_global(cfg: Config) -> None:
         raise ConfigError("integrations.autopulse.url is required when enabled")
     if auto.url and not auto.url.lower().startswith(("http://", "https://")):
         raise ConfigError("integrations.autopulse.url must start with http:// or https://")
-    if auto.trigger_endpoint and not auto.trigger_endpoint.startswith("/"):
-        raise ConfigError("integrations.autopulse.trigger_endpoint must start with /")
+    for field_name in ("trigger_endpoint", "sonarr_endpoint", "radarr_endpoint"):
+        value = getattr(auto, field_name)
+        if value and not value.startswith("/"):
+            raise ConfigError(
+                f"integrations.autopulse.{field_name} must start with /")
     for provider in ("sonarr", "radarr"):
         for instance in cfg.integrations.instances(provider):
             if bool(instance.path_from) != bool(instance.path_to):
@@ -1488,6 +1512,8 @@ def dump_toml(cfg: Config) -> str:
         f"username = {_fmt(auto.username)}",
         f"password = {_fmt(auto.password)}",
         f"trigger_endpoint = {_fmt(auto.trigger_endpoint)}",
+        f"sonarr_endpoint = {_fmt(auto.sonarr_endpoint)}",
+        f"radarr_endpoint = {_fmt(auto.radarr_endpoint)}",
         f"timeout = {_fmt(auto.timeout)}",
         f"max_retries = {_fmt(auto.max_retries)}",
     ])

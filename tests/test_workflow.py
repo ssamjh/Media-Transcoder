@@ -152,6 +152,35 @@ class WorkflowTest(unittest.TestCase):
         pulse.trigger.assert_called_once_with(path)
         self.assertEqual(self.db.get_job(job["id"])["status"], "done")
 
+    def _drain_to_autopulse(self):
+        """Settle one unchanged import and return the AutoPulseClient kwargs."""
+        job, _ = self.accept()
+        self.workflow.claim(job["id"])
+        self.workflow.processing_succeeded(
+            job["id"], "/media/TV/Show/episode.mkv", changed=False)
+        client = mock.Mock(return_value=mock.Mock())
+        with mock.patch("app.workflow.integrations.AutoPulseClient", client):
+            self.assertTrue(self.workflow.drain_once())
+        return client.call_args.kwargs
+
+    def test_autopulse_trigger_is_chosen_by_the_importing_arr(self):
+        """One named trigger per Arr is the common AutoPulse arrangement."""
+        self.cfg.integrations.autopulse.sonarr_endpoint = "/triggers/sonarr"
+        self.cfg.integrations.autopulse.radarr_endpoint = "/triggers/radarr"
+
+        self.assertEqual(
+            self._drain_to_autopulse()["endpoint"], "/triggers/sonarr")
+
+    def test_autopulse_falls_back_to_the_shared_trigger(self):
+        """An install with one manual trigger must be left alone.
+
+        Including one that names a trigger for the *other* Arr: this import
+        came from Sonarr, which has no override.
+        """
+        self.cfg.integrations.autopulse.radarr_endpoint = "/triggers/radarr"
+        self.assertEqual(
+            self._drain_to_autopulse()["endpoint"], "/triggers/manual")
+
     def test_exhausted_delivery_is_failed_without_reencoding(self):
         self.cfg.integrations.autopulse.max_retries = 1
         job, _ = self.accept()
