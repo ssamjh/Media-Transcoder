@@ -149,7 +149,7 @@ class TestRoundTrip(unittest.TestCase):
             max_retries=4, secret="webhook-secret")]
         c.integrations.autopulse = cfgmod.AutoPulseCfg(
             enabled=True, url="http://autopulse", username="u",
-            password="p", trigger_endpoint="/triggers/manual",
+            password="p", api_key="jellyfin-key", trigger_endpoint="/triggers/manual",
             sonarr_endpoint="/triggers/sonarr",
             radarr_endpoint="/triggers/radarr", max_retries=5)
         back = cfgmod.loads(cfgmod.dump_toml(c))

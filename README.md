@@ -6,7 +6,7 @@ tells Jellyfin when the result is final.
 
 ```text
 download client -> Sonarr/Radarr import -> Media-Transcoder
-                -> Arr rescan + targeted rename -> AutoPulse -> Jellyfin
+                -> targeted Jellyfin media update
 ```
 
 **New here? [SETUP.md](SETUP.md) walks the whole chain, step by step.**
@@ -191,15 +191,15 @@ seeding. Do not put the transcoder between the download client and the Arr.
 Each import runs three independent, durable stages:
 
 ```text
-processing -> arr_reconcile -> Jellyfin update -> complete
+processing -> Jellyfin update -> complete
 ```
 
 - A restart resumes the current stage.
 - Failures back off, stay visible, and retry with `POST /api/workflow/retry`,
   **never re-running ffmpeg**.
 - Duplicate webhook deliveries are deduplicated.
-- If a file cannot be reconciled with the Arr, Jellyfin is not called with a
-  stale filename.
+- The settled path is sent directly to Jellyfin; Sonarr/Radarr are not asked
+  to rescan or rename it.
 - Test, Rename, Health and Grab events answer `ignored: true` and queue
   nothing.
 

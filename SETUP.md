@@ -1,12 +1,12 @@
-# Setting up with Sonarr, Radarr, AutoPulse and Jellyfin
+# Setting up with Sonarr, Radarr and Jellyfin
 
 This is the deployment Media-Transcoder is built for: Sonarr and Radarr import
 a release, the transcoder processes the imported file, the Arr is told to
-rescan and rename it, and AutoPulse hands the final path to Jellyfin.
+process it, then notify Jellyfin about that exact path.
 
 ```text
 download client -> Sonarr/Radarr import -> Media-Transcoder
-                -> Arr rescan + targeted rename -> AutoPulse -> Jellyfin
+                -> targeted Jellyfin media update
 ```
 
 **The chain starts after the Arr import, deliberately.** With copy imports (no
@@ -279,7 +279,7 @@ curl -s -H "X-Api-Key: $KEY" http://transcoder:8080/api/workflow | jq .
 A healthy import moves through the stages:
 
 ```text
-processing -> arr_reconcile -> autopulse -> complete
+processing -> jellyfin -> complete
 ```
 
 Then, end to end: press **Test** in the Arr (expect `ignored: true`), import

@@ -825,7 +825,11 @@ def arr_schema(instance: ArrInstanceCfg,
     out = []
     for section, title in ARR_SECTIONS.items():
         holder = instance if section == "" else getattr(instance, section)
-        entries = _describe(holder, section, ARR_META)
+        entries = _describe(
+            holder, section, ARR_META,
+            skip=("url", "api_key", "path_from", "path_to",
+                  "request_timeout", "command_timeout", "poll_interval",
+                  "max_retries"))
         if cfg is not None:
             for entry in entries:
                 if entry["key"] == "mode":

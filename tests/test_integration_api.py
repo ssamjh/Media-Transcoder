@@ -84,9 +84,8 @@ class IntegrationApiTest(unittest.TestCase):
         card = d["sonarr"][0]
         self.assertEqual(card["id"], "tv-sonarr")
         self.assertTrue(card["webhook"].endswith("/api/webhook/sonarr/tv-sonarr"))
-        # Created with no credentials, so it can receive but not reconcile,
-        # and the panel says so rather than looking finished.
-        self.assertFalse(card["outbound_ready"])
+        # Arr profiles are inbound-only; no rescan credentials are required.
+        self.assertTrue(card["outbound_ready"])
         self.assertFalse(card["api_key_configured"])
 
     def test_the_profile_is_written_to_the_config_file(self):
@@ -101,10 +100,10 @@ class IntegrationApiTest(unittest.TestCase):
                   for b in d["sonarr"][0]["schema"] for f in b["fields"]}
         self.assertIn("cleanup", fields["mode"]["choices"])
         self.assertIn("", fields["mode"]["choices"])   # the library's own mode
-        self.assertTrue(fields["api_key"]["secret"])
         self.assertTrue(fields["secret"]["secret"])
         self.assertTrue(fields["id"]["readonly"])
-        self.assertFalse(fields["url"]["secret"])
+        self.assertNotIn("url", fields)
+        self.assertNotIn("api_key", fields)
 
     # --- updating ---------------------------------------------------------
 
@@ -137,11 +136,9 @@ class IntegrationApiTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("path_from and path_to", d["error"])
 
-        live, _ = self.get("/api/integrations")
-        fields = {f["key"]: f["value"]
-                  for b in live["sonarr"][0]["schema"] for f in b["fields"]}
-        self.assertEqual(fields["path_from"], "")
-        self.assertEqual(fields["max_retries"], 3)
+        instance = self.cfg.integrations.sonarr[0]
+        self.assertEqual(instance.path_from, "")
+        self.assertEqual(instance.max_retries, 3)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
 
     def test_an_unknown_mode_is_refused(self):
@@ -190,23 +187,23 @@ class IntegrationApiTest(unittest.TestCase):
 
     def test_autopulse_can_be_configured_from_the_panel(self):
         d, status = self.post("/api/integrations/autopulse", {"updates": {
-            "enabled": True, "url": "http://autopulse:2875",
-            "username": "user", "password": "pw"}})
+            "enabled": True, "url": "http://jellyfin:8096",
+            "api_key": "jellyfin-key"}})
         self.assertEqual(status, 200)
         self.assertTrue(d["autopulse"]["enabled"])
-        self.assertEqual(d["autopulse"]["url"], "http://autopulse:2875")
+        self.assertEqual(d["autopulse"]["url"], "http://jellyfin:8096")
         self.assertIn("[integrations.autopulse]",
                       self.config_path.read_text(encoding="utf-8"))
 
     def test_autopulse_rejects_a_url_without_a_scheme(self):
         self.post("/api/integrations/autopulse",
-                  {"updates": {"url": "http://autopulse:2875"}})
+                  {"updates": {"url": "http://jellyfin:8096"}})
         d, status = self.post("/api/integrations/autopulse",
                               {"updates": {"url": "autopulse:2875"}})
         self.assertEqual(status, 400)
         self.assertIn("http://", d["error"])
         live, _ = self.get("/api/integrations")
-        self.assertEqual(live["autopulse"]["url"], "http://autopulse:2875")
+        self.assertEqual(live["autopulse"]["url"], "http://jellyfin:8096")
 
     def test_enabling_autopulse_without_a_url_is_refused(self):
         _, status = self.post("/api/integrations/autopulse",
@@ -248,11 +245,12 @@ class IntegrationApiTest(unittest.TestCase):
         self.assertEqual(status, 400)
 
         self.post("/api/integrations/autopulse",
-                  {"updates": {"url": "http://autopulse:2875"}})
+                  {"updates": {"url": "http://jellyfin:8096",
+                               "api_key": "jellyfin-key"}})
         d, status = self.post("/api/integrations/test",
                               {"provider": "autopulse"})
         self.assertEqual(status, 200)
-        self.assertIn("/triggers/manual", d["message"])
+        self.assertIn("/Library/Media/Updated", d["message"])
 
     # --- the webhook still works ------------------------------------------
 
