@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("transcoder.backup")
+log = logging.getLogger("standardisarr.backup")
 
 PREFIX = "state-"
 SUFFIX = ".db"

@@ -37,9 +37,9 @@ def _setup_logging(level: str) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="transcoder", description=__doc__)
+    ap = argparse.ArgumentParser(prog="standardisarr", description=__doc__)
     ap.add_argument("-c", "--config",
-                    default=os.environ.get("TRANSCODER_CONFIG", DEFAULT_CONFIG),
+                    default=os.environ.get("STANDARDISARR_CONFIG", DEFAULT_CONFIG),
                     help="path to config.toml")
     ap.add_argument("--db", help="override the state database path")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "info"))
@@ -97,7 +97,7 @@ def _preflight(cfg, log, check_temp: bool = True) -> bool:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
-    log = logging.getLogger("transcoder")
+    log = logging.getLogger("standardisarr")
 
     try:
         cfg = config_mod.load(args.config)

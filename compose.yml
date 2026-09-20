@@ -1,8 +1,8 @@
 services:
-  transcoder:
-    container_name: transcoder
+  standardisarr:
+    container_name: standardisarr
     build: .
-    image: transcoder:latest
+    image: standardisarr:latest
     restart: unless-stopped
     ports:
       # The panel has no authentication and can start encodes and rewrite the
@@ -10,7 +10,7 @@ services:
       - 8080:8080
     environment:
       - TZ=Pacific/Auckland
-      - TRANSCODER_CONFIG=/config/config.toml
+      - STANDARDISARR_CONFIG=/config/config.toml
       - LOG_LEVEL=info
       # The container starts as root, moves its user onto these ids, chowns
       # what it writes to, and drops to them. Set them to whoever owns your
@@ -28,6 +28,6 @@ services:
       # a faster or roomier disk if this one is neither; keep it off network
       # shares, which an encode hammers. The entrypoint chowns it to
       # PUID:PGID on start, so it can be owned by anyone.
-      - ./transcode_cache:/tmp/transcoder
+      - ./transcode_cache:/tmp/standardisarr
     cpus: 8
     mem_limit: 4g

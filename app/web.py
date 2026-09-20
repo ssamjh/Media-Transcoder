@@ -32,7 +32,7 @@ from .db import loads as json_loads
 from .engine import MAX_ATTEMPTS, Engine
 from .probe import ProbeError
 
-log = logging.getLogger("transcoder.web")
+log = logging.getLogger("standardisarr.web")
 
 STATIC = Path(__file__).parent / "static"
 MAX_BODY = 1 << 20  # 1 MB is far more than any request here needs
@@ -100,7 +100,7 @@ def _nested(payload: dict[str, Any], *keys: str) -> Any:
 
 class Handler(BaseHTTPRequestHandler):
     engine: Engine
-    server_version = "transcoder"
+    server_version = "standardisarr"
 
     def log_message(self, fmt: str, *args) -> None:
         log.debug(fmt, *args)

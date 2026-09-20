@@ -1,11 +1,11 @@
-# transcoder
+# Standardisarr
 
-A self-hosted transcoder for a Sonarr/Radarr/Jellyfin library. It picks up a
+A self-hosted media standardiser for a Sonarr/Radarr/Jellyfin library. It picks up a
 file after the Arr import, does only the work that file actually needs, and
 tells Jellyfin when the result is final.
 
 ```text
-download client -> Sonarr/Radarr import -> Media-Transcoder
+download client -> Sonarr/Radarr import -> Standardisarr
                 -> targeted Jellyfin media update
 ```
 
@@ -176,7 +176,7 @@ processes it, without waiting for a scan to notice it.
 **Full walkthrough: [SETUP.md](SETUP.md).** The short version:
 
 1. **Integrations tab → Add Sonarr / Add Radarr.** Name it, then fill in that
-   application's url and api_key so the transcoder can ask it to rescan and
+   application's url and api_key so Standardisarr can ask it to rescan and
    rename. Press **Test** to prove the credentials.
 2. **Copy the webhook URL from the card** into that Arr under
    Settings → Connect → Webhook, with **On Import** and **On Upgrade** ticked
@@ -186,7 +186,7 @@ processes it, without waiting for a scan to notice it.
 
 **The chain starts after the Arr import, deliberately.** With copy imports (no
 hard links) only the library copy changes, so the torrent payload keeps
-seeding. Do not put the transcoder between the download client and the Arr.
+seeding. Do not put Standardisarr between the download client and the Arr.
 
 Each import runs three independent, durable stages:
 

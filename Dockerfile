@@ -12,20 +12,20 @@ RUN apt-get update \
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    TRANSCODER_CONFIG=/config/config.toml \
+    STANDARDISARR_CONFIG=/config/config.toml \
     PUID=1000 \
     PGID=1000
 
-WORKDIR /opt/transcoder
+WORKDIR /opt/standardisarr
 COPY app/ ./app/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN useradd --uid 1000 --user-group --create-home --shell /usr/sbin/nologin transcoder \
- && mkdir -p /config /tmp/transcoder /media \
+RUN useradd --uid 1000 --user-group --create-home --shell /usr/sbin/nologin standardisarr \
+ && mkdir -p /config /tmp/standardisarr /media \
  && chmod +x /usr/local/bin/docker-entrypoint.sh \
- && chown -R transcoder:transcoder /config /tmp/transcoder /opt/transcoder
+ && chown -R standardisarr:standardisarr /config /tmp/standardisarr /opt/standardisarr
 
-# Deliberately still root here: the entrypoint aligns the transcoder user with
+# Deliberately still root here: the entrypoint aligns the standardisarr user with
 # PUID/PGID, chowns what it writes to, and then steps down with setpriv. It
 # also handles being started unprivileged (compose `user:`) by simply running
 # as whoever it is.

@@ -33,7 +33,7 @@ port but never starts worker threads, so it touches nothing.
   Dockerfile and the README.
 - **Python 3.14 / ffmpeg 7.x** (Debian 13 base image).
 - **The image starts as root and steps down.** `docker-entrypoint.sh` moves the
-  `transcoder` user onto `PUID`/`PGID`, chowns `/config` and the configured scratch
+  `standardisarr` user onto `PUID`/`PGID`, chowns `/config` and the configured scratch
   directory, and `exec setpriv`s into it - the linuxserver.io arrangement, so a bind
   mount's host ownership is matched instead of fought. Started unprivileged (compose
   `user:`) it skips all of that and runs as whoever it is. `cli._preflight` then checks

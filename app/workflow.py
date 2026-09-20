@@ -19,7 +19,7 @@ from typing import Any
 from . import integrations
 from .db import Db, loads
 
-log = logging.getLogger("transcoder.workflow")
+log = logging.getLogger("standardisarr.workflow")
 
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:

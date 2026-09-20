@@ -1,17 +1,17 @@
 # Setting up with Sonarr, Radarr and Jellyfin
 
-This is the deployment Media-Transcoder is built for: Sonarr and Radarr import
-a release, the transcoder processes the imported file, the Arr is told to
+This is the deployment Standardisarr is built for: Sonarr and Radarr import
+a release, Standardisarr processes the imported file, the Arr is told to
 process it, then notify Jellyfin about that exact path.
 
 ```text
-download client -> Sonarr/Radarr import -> Media-Transcoder
+download client -> Sonarr/Radarr import -> Standardisarr
                 -> targeted Jellyfin media update
 ```
 
 **The chain starts after the Arr import, deliberately.** With copy imports (no
-hard links) the transcoder only ever changes the library copy, so the torrent
-payload stays untouched and keeps seeding. Putting the transcoder between the
+hard links) Standardisarr only ever changes the library copy, so the torrent
+payload stays untouched and keeps seeding. Putting Standardisarr between the
 download client and the Arr leaves the Arr with no settled, managed file to
 identify. Don't.
 
@@ -25,22 +25,22 @@ writes is shown at the end of step 5 for anyone who prefers it.
 ## 1. Paths every container must agree on
 
 The one thing that breaks this setup more than anything else is the media path
-being spelled differently in each container. The transcoder receives a path
+being spelled differently in each container. Standardisarr receives a path
 from the Arr webhook and has to open that file itself.
 
 The simplest arrangement is to mount the media at the **same path everywhere**:
 
 ```yaml
-# sonarr, radarr, and transcoder alike
+# sonarr, radarr, and standardisarr alike
 volumes:
   - /mnt/nfs/media:/media
 ```
 
 If the Arrs already see the library somewhere else, don't remount them. Map
-the prefix on the transcoder side instead, with `path_from` (what the Arr
-writes) and `path_to` (where the transcoder sees it), covered in step 4.
+the prefix on the Standardisarr side instead, with `path_from` (what the Arr
+writes) and `path_to` (where Standardisarr sees it), covered in step 4.
 
-Ownership matters too, because the transcoder replaces files in place. Set
+Ownership matters too, because Standardisarr replaces files in place. Set
 `PUID`/`PGID` to whoever owns the media on the host:
 
 ```bash
@@ -49,26 +49,26 @@ stat -c '%u:%g' /mnt/nfs/media
 
 ```yaml
 services:
-  transcoder:
-    container_name: transcoder
+  standardisarr:
+    container_name: standardisarr
     build: .
     restart: unless-stopped
     ports:
       - 8080:8080
     environment:
       - TZ=Pacific/Auckland
-      - TRANSCODER_CONFIG=/config/config.toml
+      - STANDARDISARR_CONFIG=/config/config.toml
       - PUID=1000
       - PGID=1000
     volumes:
       - ./config:/config
       - /mnt/nfs/media:/media
-      - ./transcode_cache:/tmp/transcoder   # real disk, one encode per worker
+      - ./transcode_cache:/tmp/standardisarr   # real disk, one encode per worker
     cpus: 8
     mem_limit: 4g
 ```
 
-Put the transcoder on the same Docker network as Sonarr, Radarr and AutoPulse
+Put Standardisarr on the same Docker network as Sonarr, Radarr and AutoPulse
 so they can reach each other by container name. Start it once to generate the
 config and an API key:
 
@@ -133,7 +133,7 @@ to do any work. It answers with the Arr's version, or with what went wrong.
 
 Every change is written straight to `config/config.toml`, so nothing needs a
 restart and the file stays the source of truth. Editing that file by hand
-still works; restart with `docker compose restart transcoder` if you do.
+still works; restart with `docker compose restart standardisarr` if you do.
 
 ## 4. Point the Arr at the webhook
 
@@ -141,9 +141,9 @@ In each Arr: **Settings → Connect → + → Webhook**.
 
 | Field | Value |
 | --- | --- |
-| Name | `Media-Transcoder` |
+| Name | `Standardisarr` |
 | Triggers | **On Import** and **On Upgrade** only |
-| URL | the URL copied from the profile card, such as `http://transcoder:8080/api/webhook/sonarr/tv-sonarr` |
+| URL | the URL copied from the profile card, such as `http://standardisarr:8080/api/webhook/sonarr/tv-sonarr` |
 | Method | POST |
 | Headers | `X-Api-Key: <the key from the Integrations tab>` |
 
@@ -161,7 +161,7 @@ restart mid-encode resumes rather than loses the job, and a redelivered webhook
 is deduplicated instead of encoding twice.
 
 If you already have an Arr → AutoPulse webhook for import events, **remove
-it**. The transcoder calls AutoPulse itself, after the file and its Arr name
+it**. Standardisarr calls AutoPulse itself, after the file and its Arr name
 are final; leaving the old one in place tells Jellyfin about a filename that is
 about to change.
 
@@ -177,7 +177,7 @@ profile. Tick it on, press
 | `api_key` | A Jellyfin API key. |
 | `timeout`, `max_retries` | How long to wait, and how many times to retry before parking the job. |
 
-The transcoder posts Jellyfin's `Updates` payload to
+Standardisarr posts Jellyfin's `Updates` payload to
 `/Library/Media/Updated`, using the path **after** the Arr rename. The same
 targeted call is made for files processed manually or by a scheduled scan.
 
@@ -202,7 +202,7 @@ mode = "cleanup"              # one-shot mode for files from this Arr
 url = "http://sonarr:8989"
 api_key = "sonarr-api-key"
 path_from = ""                # Arr-side prefix, if it differs
-path_to = ""                  # transcoder-side prefix
+path_to = ""                  # Standardisarr-side prefix
 request_timeout = 15.0
 command_timeout = 300.0       # how long to wait for a rescan/rename command
 poll_interval = 2.0
@@ -229,7 +229,7 @@ max_retries = 3
   them the job fails at `arr_reconcile`, and AutoPulse is never called with a
   stale name.
 - `path_from`/`path_to` map the Arr's view of the library onto the
-  transcoder's. Set **both or neither**. Validation rejects one alone, and the
+  Standardisarr's. Set **both or neither**. Validation rejects one alone, and the
   panel refuses the save rather than applying half of it.
 - A 4K Radarr and an HD Radarr are two profiles, two webhook URLs, and can
   name different modes.
@@ -272,8 +272,8 @@ per accepted import, the stage it reached, what the Arr and AutoPulse hand-offs
 did, and the error if one of them refused. The same thing over HTTP:
 
 ```bash
-curl -s http://transcoder:8080/health                       # no key needed
-curl -s -H "X-Api-Key: $KEY" http://transcoder:8080/api/workflow | jq .
+curl -s http://standardisarr:8080/health                       # no key needed
+curl -s -H "X-Api-Key: $KEY" http://standardisarr:8080/api/workflow | jq .
 ```
 
 A healthy import moves through the stages:
@@ -292,8 +292,8 @@ Failures are visible and retryable, and **a retry never re-runs FFmpeg**. The
 encode and the remote calls have separate lifetimes on purpose.
 
 ```bash
-docker compose logs -f transcoder
-curl -s -X POST -H "X-Api-Key: $KEY" http://transcoder:8080/api/workflow/retry \
+docker compose logs -f standardisarr
+curl -s -X POST -H "X-Api-Key: $KEY" http://standardisarr:8080/api/workflow/retry \
   -H 'Content-Type: application/json' -d '{}'          # or {"job_id": 12}
 ```
 
@@ -361,8 +361,8 @@ paths = ["/media/Movies"]
 mode = "standard"
 ```
 
-Sonarr's webhook points at `http://transcoder:8080/api/webhook/sonarr/tv`,
-Radarr's at `http://transcoder:8080/api/webhook/radarr/movies`, both with
+Sonarr's webhook points at `http://standardisarr:8080/api/webhook/sonarr/tv`,
+Radarr's at `http://standardisarr:8080/api/webhook/radarr/movies`, both with
 **On Import** and **On Upgrade** and the `X-Api-Key` header.
 
 New episodes get the cheap audio/subtitle/container cleanup within seconds of

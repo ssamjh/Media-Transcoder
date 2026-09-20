@@ -1,5 +1,5 @@
 #!/bin/sh
-# Start as root, move the transcoder user onto PUID/PGID, take ownership of
+# Start as root, move the standardisarr user onto PUID/PGID, take ownership of
 # the directories the app writes to, then drop to that user for good.
 #
 # This is the linuxserver.io pattern, and it is here for one reason: a bind
@@ -19,16 +19,16 @@ if [ "$(id -u)" -ne 0 ]; then
     exec python -m app "$@"
 fi
 
-groupmod -o -g "$PGID" transcoder
-usermod -o -u "$PUID" -g "$PGID" transcoder
+groupmod -o -g "$PGID" standardisarr
+usermod -o -u "$PUID" -g "$PGID" standardisarr
 
 # The scratch directory is a config setting, so ask the app where it is
 # rather than duplicating the default here.
-TEMP_DIR="$(python -c 'import os; from app.config import load; print(load(os.environ.get("TRANSCODER_CONFIG")).output.temp_dir)' 2>/dev/null)" || TEMP_DIR=""
-[ -n "$TEMP_DIR" ] || TEMP_DIR=/tmp/transcoder
+TEMP_DIR="$(python -c 'import os; from app.config import load; print(load(os.environ.get("STANDARDISARR_CONFIG")).output.temp_dir)' 2>/dev/null)" || TEMP_DIR=""
+[ -n "$TEMP_DIR" ] || TEMP_DIR=/tmp/standardisarr
 
 mkdir -p /config "$TEMP_DIR"
 chown -R "$PUID:$PGID" /config "$TEMP_DIR"
 
-echo "transcoder: starting as ${PUID}:${PGID} (scratch: ${TEMP_DIR})"
+echo "standardisarr: starting as ${PUID}:${PGID} (scratch: ${TEMP_DIR})"
 exec setpriv --reuid "$PUID" --regid "$PGID" --init-groups -- python -m app "$@"

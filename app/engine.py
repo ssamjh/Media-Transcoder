@@ -24,7 +24,7 @@ from .plan import FilePlan, plan_file
 from .probe import ProbeError, probe_file
 from .workflow import Workflow
 
-log = logging.getLogger("transcoder")
+log = logging.getLogger("standardisarr")
 
 MAX_ATTEMPTS = 3
 

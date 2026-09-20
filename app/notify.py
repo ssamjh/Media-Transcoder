@@ -8,7 +8,7 @@ twenty files at once never blocks a worker on somebody else's slow HTTP
 server, and a downstream service that is down does not fail the encode.
 
 Delivery is best effort by design: a webhook that never succeeds is logged
-and dropped. The file is already correct on disk; the transcoder's own state
+and dropped. The file is already correct on disk; the application's own state
 must not depend on a third party answering.
 
 stdlib urllib only - no third-party HTTP client, same as everywhere else.
@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("transcoder.notify")
+log = logging.getLogger("standardisarr.notify")
 
 # Statuses worth another attempt: the far end is overloaded or broken, not
 # refusing us. A 404 or a 401 will still be a 404 or a 401 in eight seconds.

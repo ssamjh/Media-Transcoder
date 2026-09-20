@@ -1,3 +1,3 @@
-"""Media library transcoder: probe, plan, encode, verify, replace."""
+"""Standardisarr: probe, plan, encode, verify, replace."""
 
 __version__ = "1.0.0"

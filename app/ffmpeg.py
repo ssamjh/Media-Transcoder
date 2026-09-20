@@ -25,7 +25,7 @@ from .config import Config, LibOutputCfg, Profile
 from .plan import FilePlan
 from .probe import ProbeError, probe_file
 
-log = logging.getLogger("transcoder.ffmpeg")
+log = logging.getLogger("standardisarr.ffmpeg")
 
 FFMPEG = "ffmpeg"
 
